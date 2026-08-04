@@ -86,9 +86,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
-	resolveModelScope,
 	resolveModelScopeFromModels,
-	resolveModelScopeWithDiagnostics,
 } from "../../core/model-resolver.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
