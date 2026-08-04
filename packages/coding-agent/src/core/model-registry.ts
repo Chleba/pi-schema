@@ -24,6 +24,11 @@ export class ModelRegistry {
 		this.runtime = runtime;
 	}
 
+	/** @internal Backing runtime, reused by SDK composition when a registry is passed in place of a runtime. */
+	getModelRuntime(): ModelRuntime {
+		return this.runtime;
+	}
+
 	/** Reload models.json asynchronously. Await before making synchronous registry reads. */
 	async refresh(): Promise<void> {
 		await this.runtime.refresh();

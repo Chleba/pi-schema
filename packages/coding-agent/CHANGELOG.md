@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed SDK sub-agent sessions created with a pre-0.81 `modelRegistry` option to reuse the registry's backing runtime, so extension-registered providers and their auth resolve instead of falling back to an unconfigured runtime (`No API key found for <provider>`).
+
 ## [0.82.1] - 2026-07-25
 
 ### New Features

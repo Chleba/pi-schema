@@ -8,6 +8,7 @@ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
+import type { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
@@ -43,6 +44,14 @@ export interface CreateAgentSessionOptions {
 
 	/** Canonical model/auth runtime. Defaults to a runtime using agentDir/auth.json and models.json. */
 	modelRuntime?: ModelRuntime;
+
+	/**
+	 * Model registry whose backing runtime is reused when `modelRuntime` is not
+	 * provided. Compatibility shim for extensions that still pass a `ModelRegistry`
+	 * (pre-0.81 SDK option): the registry's runtime carries the extension-registered
+	 * providers, so sub-agent sessions resolve the same auth as the host session.
+	 */
+	modelRegistry?: ModelRegistry;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model<any>;
@@ -173,7 +182,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const authPath = options.agentDir ? join(agentDir, "auth.json") : undefined;
 	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
-	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
+	let modelRuntime = options.modelRuntime;
+	if (!modelRuntime && options.modelRegistry) {
+		modelRuntime = options.modelRegistry.getModelRuntime();
+	}
+	if (!modelRuntime) {
+		modelRuntime = await ModelRuntime.create({ authPath, modelsPath });
+	}
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
