@@ -28,6 +28,7 @@ import type {
 	ModelRevisionContext,
 	PrepareNextTurnContext,
 	QueueMode,
+	ShouldStopAfterTurnContext,
 	StreamFn,
 	ToolExecutionMode,
 } from "./types.ts";
@@ -115,6 +116,7 @@ export interface AgentOptions {
 	) => Promise<BeforeToolBatchResult | undefined>;
 	afterToolBatch?: (context: AfterToolBatchContext, signal?: AbortSignal) => Promise<AfterToolBatchResult | undefined>;
 	onModelRevision?: (context: ModelRevisionContext, signal?: AbortSignal) => Promise<string | undefined>;
+	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -208,6 +210,10 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolBatchResult | undefined>;
 	public onModelRevision?: (context: ModelRevisionContext, signal?: AbortSignal) => Promise<string | undefined>;
+	public shouldStopAfterTurn?: (
+		context: ShouldStopAfterTurnContext,
+		signal?: AbortSignal,
+	) => boolean | Promise<boolean>;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -242,6 +248,7 @@ export class Agent {
 		this.beforeToolBatch = runtimeOptions.beforeToolBatch;
 		this.afterToolBatch = runtimeOptions.afterToolBatch;
 		this.onModelRevision = runtimeOptions.onModelRevision;
+		this.shouldStopAfterTurn = runtimeOptions.shouldStopAfterTurn;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -456,6 +463,7 @@ export class Agent {
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+		const shouldStopAfterTurn = this.shouldStopAfterTurn;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -471,6 +479,9 @@ export class Agent {
 			beforeToolBatch: this.beforeToolBatch,
 			afterToolBatch: this.afterToolBatch,
 			onModelRevision: this.onModelRevision,
+			shouldStopAfterTurn: shouldStopAfterTurn
+				? async (context) => await shouldStopAfterTurn(context, this.signal)
+				: undefined,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {
