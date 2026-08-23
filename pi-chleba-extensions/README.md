@@ -7,10 +7,18 @@ compile step.
 
 ## Extensions
 
-- **lmstudio** — Connects pi to a local LM Studio server on another PC.
-  Discovers models from the `/v1/models` endpoint at startup and registers
-  them under the `lmstudio` provider. Server address is configurable via the
-  `LMSTUDIO_BASE_URL` env var (default `http://192.168.1.74:1234/v1`).
+- **ollamamq** — Connects pi to an [ollamaMQ](https://github.com/Chleba/ollamaMQ)
+  dispatcher that fronts Ollama / LM Studio / vLLM backends. Discovers the full
+  routable inventory from `/admin/models` at startup and on every catalog
+  refresh, registers it under the `ollamamq` provider, and sends an
+  `X-User-ID` header for per-user queuing. **Supersedes lmstudio** (and the
+  unversioned vllm extension) — those are disabled in
+  `~/.pi/agent/extensions-disabled/`.
+- **lmstudio** *(disabled — superseded by ollamamq)* — Connects pi to a local
+  LM Studio server on another PC. Discovers models from the `/v1/models`
+  endpoint at startup and registers them under the `lmstudio` provider. Server
+  address is configurable via the `LMSTUDIO_BASE_URL` env var (default
+  `http://192.168.1.74:1234/v1`).
 - **model-params** — `/params` slash command to set temperature, top_p, etc.
   per model or globally. Config stored at `~/.pi/agent/model-params.json`.
 - **omarchy-system-theme** — Syncs pi's light/dark theme with the active
@@ -24,6 +32,7 @@ versioned files in this repo — edits here are picked up by pi immediately
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
+ln -sf "$(pwd)/pi-chleba-extensions/ollamamq.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/lmstudio.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/model-params.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/omarchy-system-theme.ts" ~/.pi/agent/extensions/
@@ -39,14 +48,44 @@ symlink targets in place.
 ## Uninstall
 
 ```bash
-rm -f ~/.pi/agent/extensions/lmstudio.ts \
+rm -f ~/.pi/agent/extensions/ollamamq.ts \
+      ~/.pi/agent/extensions/lmstudio.ts \
       ~/.pi/agent/extensions/model-params.ts \
       ~/.pi/agent/extensions/omarchy-system-theme.ts
 ```
 
 ## Usage
 
+### ollamamq
+
+No configuration needed if the dispatcher runs at the default address. On
+startup the extension queries the proxy's `/admin/models` endpoint (falling
+back to `/v1/models`) and registers every model available on any online
+backend under the `ollamamq` provider. The list is re-fetched whenever pi
+refreshes its catalogs (`/model`), so models on backends that come online later
+appear without a restart. Embedding models are filtered out, and vision support
+is detected heuristically from the model id (same rules as lmstudio).
+
+Env vars (optional):
+
+| Var | Default |
+| --- | ------- |
+| `OLLAMA_MQ_BASE_URL` | `http://192.168.1.23:11435` |
+| `OLLAMA_MQ_API_KEY` | `ollamaMQ` (set when the proxy runs with auth) |
+| `OLLAMA_MQ_USER_ID` | `pi` |
+| `OLLAMA_MQ_MAX_TOKENS` | `32768` |
+| `OLLAMA_MQ_CONTEXT_WINDOW` | `128000` |
+| `OLLAMA_MQ_MODEL_CTX` | — (per-model context windows, e.g. `"qwendoc3=262144"`) |
+| `OLLAMA_MQ_MODEL_MAXTOK` | — (per-model max output tokens) |
+| `OLLAMA_MQ_VISION_MODELS` / `OLLAMA_MQ_TEXT_ONLY_MODELS` | — (substring overrides for vision detection) |
+
+> Tip: set per-model context windows with `OLLAMA_MQ_MODEL_CTX` to match the
+> `max_ctx` values in your ollamaMQ `appconf.yaml`.
+
 ### lmstudio
+
+*(Disabled by default — superseded by ollamamq. Re-enable by moving the file
+back into `~/.pi/agent/extensions/`.)*
 
 No configuration needed. On startup the extension queries LM Studio's
 `/v1/models` endpoint and registers the discovered models under the
