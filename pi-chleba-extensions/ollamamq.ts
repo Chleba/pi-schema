@@ -20,7 +20,8 @@
  *   OLLAMA_MQ_BASE_URL=url        dispatcher base URL (default: http://192.168.1.23:11435)
  *   OLLAMA_MQ_API_KEY=key         set when the proxy runs with auth enabled
  *                                 (OLLAMA_MQ_API_KEY on the proxy side)
- *   OLLAMA_MQ_USER_ID=id          X-User-ID header for per-user queuing (default: "pi")
+ *   OLLAMA_MQ_USER_ID=id          X-User-ID header for per-user queuing
+ *                                 (default: "pi-<hostname>-<pid>", unique per pi instance)
  *   OLLAMA_MQ_MAX_TOKENS=n        max output tokens default (default: 32768)
  *   OLLAMA_MQ_CONTEXT_WINDOW=n    context window default (default: 128000)
  *   OLLAMA_MQ_MODEL_CTX=id=ctx,...     per-model context windows, e.g. "qwendoc3=262144"
@@ -29,11 +30,12 @@
  *   OLLAMA_MQ_TEXT_ONLY_MODELS=ids     force vision OFF (checked first)
  */
 
+import { hostname } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const BASE_URL = process.env.OLLAMA_MQ_BASE_URL ?? "http://192.168.1.23:11435";
 const API_KEY = process.env.OLLAMA_MQ_API_KEY ?? "ollamaMQ";
-const USER_ID = process.env.OLLAMA_MQ_USER_ID ?? "pi";
+const USER_ID = process.env.OLLAMA_MQ_USER_ID ?? `pi-${hostname()}-${process.pid}`;
 const MAX_TOKENS = Number(process.env.OLLAMA_MQ_MAX_TOKENS) || 32768;
 const DEFAULT_CONTEXT_WINDOW = Number(process.env.OLLAMA_MQ_CONTEXT_WINDOW) || 128000;
 
@@ -136,6 +138,7 @@ function buildModels(ids: string[]) {
 }
 
 export default async function (pi: ExtensionAPI) {
+	console.log(`[ollamamq] user: ${USER_ID}`);
 	let ids: string[] = [];
 	try {
 		ids = await fetchAdminModelIds();

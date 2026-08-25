@@ -72,7 +72,7 @@ Env vars (optional):
 | --- | ------- |
 | `OLLAMA_MQ_BASE_URL` | `http://192.168.1.23:11435` |
 | `OLLAMA_MQ_API_KEY` | `ollamaMQ` (set when the proxy runs with auth) |
-| `OLLAMA_MQ_USER_ID` | `pi` |
+| `OLLAMA_MQ_USER_ID` | `pi-<hostname>-<pid>` (auto, unique per pi instance) |
 | `OLLAMA_MQ_MAX_TOKENS` | `32768` |
 | `OLLAMA_MQ_CONTEXT_WINDOW` | `128000` |
 | `OLLAMA_MQ_MODEL_CTX` | — (per-model context windows, e.g. `"qwendoc3=262144"`) |
