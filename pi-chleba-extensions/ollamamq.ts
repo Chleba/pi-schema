@@ -33,7 +33,7 @@
 import { hostname } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const BASE_URL = process.env.OLLAMA_MQ_BASE_URL ?? "http://192.168.1.23:11435";
+const BASE_URL = process.env.OLLAMA_MQ_BASE_URL ?? "http://192.168.1.26:11435";
 const API_KEY = process.env.OLLAMA_MQ_API_KEY ?? "ollamaMQ";
 const USER_ID = process.env.OLLAMA_MQ_USER_ID ?? `pi-${hostname()}-${process.pid}`;
 const MAX_TOKENS = Number(process.env.OLLAMA_MQ_MAX_TOKENS) || 32768;
