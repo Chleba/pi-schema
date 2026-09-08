@@ -21,7 +21,7 @@ git remote -v
 | Decision tracking core | `packages/coding-agent/src/core/schema-decisions.ts`, `core/tools/decisions.ts` |
 | Session integration | `packages/coding-agent/src/core/{agent-session.ts,session-manager.ts,sdk.ts,slash-commands.ts}` — hooks install, system-prompt digest decoration, auto-continuation nag, `/decisions` command, decisions tool registration in `_baseToolDefinitions` + default active tools |
 | Feature flag | `packages/coding-agent/src/core/experimental.ts` — must export BOTH `isSchemaDecisionTrackingEnabled()` (fork) and upstream's exports (`areExperimentalFeaturesEnabled`, `getExperimentalToolSampling`) |
-| TUI rendering | `modes/interactive/components/{decision-entry.ts,index.ts}`, `interactive-mode.ts` (`RenderSessionItem` union, `isDecisionSessionEntry`, decision branch in `renderSessionEntries`, `addDecisionEntryToChat`), theme files |
+| TUI rendering | `modes/interactive/components/{decision-entry.ts,index.ts}`, `interactive-mode.ts` (`RenderSessionItem` union, `isDecisionSessionEntry`, decision branch in `renderSessionEntries`, `addDecisionEntryToChat`), theme files incl. `theme/theme-json.ts` (plan/expected colors live in the schema there since upstream moved `ThemeJsonSchema` out of `theme.ts` into the lazy validator) |
 | Tests / docs | `packages/coding-agent/test/schema-decisions.test.ts`, `docs/schema-harness-improvements.md`, `localbench.ts` |
 
 ## Procedure
@@ -77,7 +77,11 @@ git remote -v
 ## Gotchas learned the hard way
 
 - The merge is large (hundreds of upstream commits) but real conflicts are usually few: most are version/lockfile noise; the code conflicts concentrate where the fork feature touches hot files.
-- `experimental.ts` is an add/add conflict every sync (upstream added it independently): resolve as the union of both sides' exports.
+- `experimental.ts` is an add/add conflict every sync (upstream added it independently): resolve as the union of both sides' exports. In the 0.85.1 sync upstream's side was a strict subset of the fork's, so `--ours` was the union.
 - Upstream refactors `renderSessionEntries` and friends regularly — expect to re-port the decision branch into whatever shape upstream's entry→items pipeline has taken.
 - Stale gitignored `packages/ai/src/providers/data/*.json` from an older sync break `tsgo --noEmit` with "unknown does not satisfy ModelGroups" / missing model id errors; always regenerate before check.
-- If sub-agent delegation (orch workers) is down, do the merge directly in the main session — it is mechanical except for the 2–4 code-conflict files.
+- The fork's cloudflare workers-ai mirror fix (`cbd752021`: `generate-models.ts` + `cloudflare-ai-gateway.ts` type) was UPSTREAMED in 0.85.x. If those files conflict, upstream now contains the fix — take upstream, do not re-apply the fork hunks.
+- Upstream added `_compactBeforeNextAssistantResponse` to `agent-session.ts` at the same insertion point as `_installSchemaDecisionHooks` (0.85.1): keep BOTH methods, and note upstream renamed the next-turn context variable `previousContext` → `nextContext` (the fork's decorated `systemPrompt` spreads over `nextContext`).
+- `git commit` during a merge opens `$EDITOR` (nvim) to confirm `MERGE_MSG` and hangs in non-TTY shells — always pass an explicit `-m`. The pre-commit hook re-runs the full `npm run check` + browser smoke (several minutes); a slow commit is not a hang.
+- The fork's CHANGELOG once carried a duplicate `## [0.82.1]` section (fork release notes stacked on upstream's); it was deduplicated in the 0.85.1 merge. If a version section appears twice, merge the Fixed lists into one section.
+- If sub-agent delegation (orch workers) is down, do the merge directly in the main session — it is mechanical except for the 2–4 code-conflict files. (Observed 2026-09: worker sessions stalled after their first turn twice in a row; direct execution of the 0.85.1 sync took one pass.)
