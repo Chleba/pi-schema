@@ -28,6 +28,8 @@
  *   OLLAMA_MQ_MODEL_MAXTOK=id=n,...    per-model max output tokens
  *   OLLAMA_MQ_VISION_MODELS=ids        force vision ON (substring match on id)
  *   OLLAMA_MQ_TEXT_ONLY_MODELS=ids     force vision OFF (checked first)
+ *   OLLAMA_MQ_REASONING_MODELS=ids     force reasoning ON (substring match on id)
+ *   OLLAMA_MQ_NON_REASONING_MODELS=ids force reasoning OFF (checked first)
  */
 
 import { hostname } from "node:os";
@@ -68,6 +70,25 @@ function hasVision(id: string): boolean {
 		return true;
 	}
 	return VISION_MODEL_PATTERN.test(lower);
+}
+
+// Thinking-capable families known to work through the dispatcher. The proxy exposes no
+// per-model capability metadata, so anything not matched here is registered as non-reasoning
+// and can be opted in with OLLAMA_MQ_REASONING_MODELS.
+//   qwen[-.]3 / 3.5 / 3.8 | deepseek(-...)-r1 | think(er) incl. rwkv-thinker | gemma-4
+//   gpt-oss | minimax-m2 | kimi(-k2) | glm-4.5 / glm-4.6 | hermes | nova | command-a | internlm
+const REASONING_MODEL_PATTERN =
+	/qwen[-_.]?3|deepseek[-\w.]*r1|think|gemma-?4|gpt-oss|minimax[-_.]?m2|kimi|glm[-_.]?4[-_.]?[56]|hermes|nova|command-a|internlm/i;
+
+function supportsReasoning(id: string): boolean {
+	const lower = id.toLowerCase();
+	if (splitList(process.env.OLLAMA_MQ_NON_REASONING_MODELS).some((entry) => lower.includes(entry))) {
+		return false;
+	}
+	if (splitList(process.env.OLLAMA_MQ_REASONING_MODELS).some((entry) => lower.includes(entry))) {
+		return true;
+	}
+	return REASONING_MODEL_PATTERN.test(lower);
 }
 
 /** Parse "id=value,id=value" env maps into a lowercase-keyed number map. */
@@ -126,15 +147,33 @@ async function fetchV1ModelIds(signal?: AbortSignal): Promise<string[]> {
 }
 
 function buildModels(ids: string[]) {
-	return ids.map((id) => ({
-		id,
-		name: id,
-		reasoning: false,
-		input: hasVision(id) ? (["text", "image"] as const) : (["text"] as const),
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: MODEL_CTX.get(id.toLowerCase()) ?? DEFAULT_CONTEXT_WINDOW,
-		maxTokens: MODEL_MAXTOK.get(id.toLowerCase()) ?? MAX_TOKENS,
-	}));
+	return ids.map((id) => {
+		const reasoning = supportsReasoning(id);
+		const model = {
+			id,
+			name: id,
+			reasoning,
+			input: hasVision(id) ? (["text", "image"] as const) : (["text"] as const),
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: MODEL_CTX.get(id.toLowerCase()) ?? DEFAULT_CONTEXT_WINDOW,
+			maxTokens: MODEL_MAXTOK.get(id.toLowerCase()) ?? MAX_TOKENS,
+		};
+		if (!reasoning) return model;
+		// This backend only speaks the Qwen chat-template thinking switch:
+		// chat_template_kwargs { enable_thinking: <bool>, preserve_thinking: true } toggles
+		// `reasoning_content` on/off (verified against the dispatcher, streaming included).
+		// Graded effort is not expressible, so off/low/medium/high all stay visible but behave
+		// as plain on/off toggles, while minimal/xhigh/max are hidden as unsupported levels.
+		return {
+			...model,
+			thinkingLevelMap: { minimal: null, xhigh: null, max: null } as const,
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: false,
+			} as const,
+		};
+	});
 }
 
 export default async function (pi: ExtensionAPI) {
