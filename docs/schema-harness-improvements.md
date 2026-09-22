@@ -186,7 +186,7 @@ This PR lands **P0** (LLM-visible Timeline) and **P4** (defect fixes) from the a
 
 Schema's central mechanism is that the agent can read its past observations before re-planning. Until this PR `DecisionEntry` was explicitly excluded from `buildSessionContext`, so the agent literally could not see its own past decisions — the entire backtest / revise premise of Schema was unreachable.
 
-P0 surfaces the Timeline to the LLM via a compact digest of recent *failed* and *partial* decisions appended to the system prompt each turn (see `SessionManager.getRecentDecisionsDigest` and `AgentSession._decorateSystemPromptWithDecisions`). Successes are filtered out — they carry no revision value and would just bloat the prompt.
+P0 surfaces the Timeline to the LLM as two named system-prompt sections — `schema_declaration_convention` and `recent_decisions` (the latter a digest of recent *failed* and *partial* decisions) — injected by `AgentSession._schemaDecisionPromptSections()` into the options of both prompt builds: the run's first request and every per-turn refresh (see also `SessionManager.getRecentDecisionsDigestBody`). Successes are filtered out — they carry no revision value and would just bloat the prompt.
 
 A follow-up (P5) will add a `decisions` read-only tool so the agent can pull older decisions on demand.
 
@@ -209,7 +209,7 @@ A follow-up (P5) will add a `decisions` read-only tool so the agent can pull old
 | `packages/agent/src/agent.ts` | Added hook properties to `Agent` class and `AgentOptions` |
 | `packages/agent/src/agent-loop.ts` | Integrated hooks into main loop; emits revision as `schema_revision` custom message; added `SCHEMA_REVISION_CUSTOM_TYPE` |
 | `packages/coding-agent/src/core/session-manager.ts` | `DecisionEntry` + `DecisionRecord`; append-only `appendDecision`; `getDecisions` / `getDecision` / `getRecentDecisionsDigest` |
-| `packages/coding-agent/src/core/agent-session.ts` | `_installSchemaDecisionHooks` delegates to factory and is gated behind experimental; per-turn decision digest via `_decorateSystemPromptWithDecisions` |
+| `packages/coding-agent/src/core/agent-session.ts` | `_installSchemaDecisionHooks` delegates to factory and is gated behind experimental; decision convention + per-turn digest as prompt sections via `_schemaDecisionPromptSections` |
 | `packages/coding-agent/src/core/schema-decisions.ts` | Unified factory (`createSchemaDecisionHooks`); strict `<expected>` extractor; `hasErrors`-based `classifyOutcome`; `onDecisionAppended` callback |
 | `packages/coding-agent/src/core/experimental.ts` | `isSchemaDecisionTrackingEnabled` opt-in via `PI_EXPERIMENTAL` / `PI_SCHEMA_DECISIONS` |
 | `packages/coding-agent/src/core/index.ts` | Updated exports for the renamed/re-added symbols |
