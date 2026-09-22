@@ -1,11 +1,15 @@
-import type {
-	ImageContent,
-	Message,
-	Model,
-	SimpleStreamOptions,
-	TextContent,
-	ThinkingBudgets,
-	Transport,
+import {
+	createInitialSystemMessage,
+	getCurrentSystemMessage,
+	getCurrentSystemPrompt,
+	type ImageContent,
+	type Message,
+	type Model,
+	type SimpleStreamOptions,
+	type TextContent,
+	type ThinkingBudgets,
+	type Transport,
+	toToolDeclaration,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
@@ -25,10 +29,11 @@ import type {
 	BeforeToolBatchResult,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	FinishTurn,
 	ModelRevisionContext,
 	PrepareNextTurnContext,
+	PrepareRequest,
 	QueueMode,
-	ShouldStopAfterTurnContext,
 	StreamFn,
 	ToolExecutionMode,
 } from "./types.ts";
@@ -37,7 +42,11 @@ export type { QueueMode } from "./types.ts";
 
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
-		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+		(message) =>
+			message.role === "system" ||
+			message.role === "user" ||
+			message.role === "assistant" ||
+			message.role === "toolResult",
 	);
 }
 
@@ -70,14 +79,21 @@ type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "
 	errorMessage?: string;
 };
 
-function createMutableAgentState(
-	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>,
-): MutableAgentState {
+/** Initial state for {@link Agent}. `systemPrompt` and `tools` become the leading system message unless `messages` already starts with one. */
+export type AgentInitialState = Partial<
+	Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">
+>;
+
+function createMutableAgentState(initialState?: AgentInitialState): MutableAgentState {
 	let tools = initialState?.tools?.slice() ?? [];
 	let messages = initialState?.messages?.slice() ?? [];
+	const initialMessage = createInitialSystemMessage(initialState?.systemPrompt, tools.map(toToolDeclaration));
+	if (messages[0]?.role !== "system" && initialMessage) messages.unshift(initialMessage);
 
 	return {
-		systemPrompt: initialState?.systemPrompt ?? "",
+		get systemPrompt() {
+			return getCurrentSystemPrompt(messages);
+		},
 		model: initialState?.model ?? DEFAULT_MODEL,
 		thinkingLevel: initialState?.thinkingLevel ?? "off",
 		get tools() {
@@ -101,7 +117,7 @@ function createMutableAgentState(
 
 /** Options for constructing an {@link Agent}. */
 export interface AgentOptions {
-	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
+	initialState?: AgentInitialState;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	streamFn: StreamFn;
@@ -116,7 +132,8 @@ export interface AgentOptions {
 	) => Promise<BeforeToolBatchResult | undefined>;
 	afterToolBatch?: (context: AfterToolBatchContext, signal?: AbortSignal) => Promise<AfterToolBatchResult | undefined>;
 	onModelRevision?: (context: ModelRevisionContext, signal?: AbortSignal) => Promise<string | undefined>;
-	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
+	finishTurn?: FinishTurn;
+	prepareRequest?: PrepareRequest;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -149,19 +166,16 @@ class PendingMessageQueue {
 		return this.messages.length > 0;
 	}
 
-	drain(): AgentMessage[] {
-		if (this.mode === "all") {
-			const drained = this.messages.slice();
-			this.messages = [];
-			return drained;
-		}
-
+	peek(): AgentMessage[] {
+		if (this.mode === "all") return this.messages.slice();
 		const first = this.messages[0];
-		if (!first) {
-			return [];
-		}
-		this.messages = this.messages.slice(1);
-		return [first];
+		return first ? [first] : [];
+	}
+
+	drain(): AgentMessage[] {
+		const drained = this.peek();
+		this.messages = this.messages.slice(drained.length);
+		return drained;
 	}
 
 	clear(): void {
@@ -210,10 +224,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolBatchResult | undefined>;
 	public onModelRevision?: (context: ModelRevisionContext, signal?: AbortSignal) => Promise<string | undefined>;
-	public shouldStopAfterTurn?: (
-		context: ShouldStopAfterTurnContext,
-		signal?: AbortSignal,
-	) => boolean | Promise<boolean>;
+	public finishTurn?: FinishTurn;
+	public prepareRequest?: PrepareRequest;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -248,7 +260,8 @@ export class Agent {
 		this.beforeToolBatch = runtimeOptions.beforeToolBatch;
 		this.afterToolBatch = runtimeOptions.afterToolBatch;
 		this.onModelRevision = runtimeOptions.onModelRevision;
-		this.shouldStopAfterTurn = runtimeOptions.shouldStopAfterTurn;
+		this.finishTurn = runtimeOptions.finishTurn;
+		this.prepareRequest = runtimeOptions.prepareRequest;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -333,6 +346,12 @@ export class Agent {
 		return this.steeringQueue.hasItems() || this.followUpQueue.hasItems();
 	}
 
+	/** Preview the messages selected for the next turn without consuming them. */
+	peekQueuedMessages(): AgentMessage[] {
+		const steering = this.steeringQueue.peek();
+		return steering.length > 0 ? steering : this.followUpQueue.peek();
+	}
+
 	/** Active abort signal for the current run, if any. */
 	get signal(): AbortSignal | undefined {
 		return this.activeRun?.abortController.signal;
@@ -352,13 +371,14 @@ export class Agent {
 		return this.activeRun?.promise ?? Promise.resolve();
 	}
 
-	/** Clear transcript state, runtime state, and queued messages. */
+	/** Clear conversation state and queues while retaining the replayed prompt/tool baseline. */
 	reset(): void {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before resetting.");
 		}
 
-		this._state.messages = [];
+		const baseline = getCurrentSystemMessage(this._state.messages);
+		this._state.messages = baseline ? [baseline] : [];
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -387,7 +407,7 @@ export class Agent {
 		}
 
 		const lastMessage = this._state.messages[this._state.messages.length - 1];
-		if (!lastMessage) {
+		if (!lastMessage || this._state.messages.every((message) => message.role === "system")) {
 			throw new Error("No messages to continue from");
 		}
 
@@ -459,7 +479,6 @@ export class Agent {
 
 	private createContextSnapshot(): AgentContext {
 		return {
-			systemPrompt: this._state.systemPrompt,
 			messages: this._state.messages.slice(),
 			tools: this._state.tools.slice(),
 		};
@@ -467,7 +486,6 @@ export class Agent {
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
-		const shouldStopAfterTurn = this.shouldStopAfterTurn;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -483,9 +501,8 @@ export class Agent {
 			beforeToolBatch: this.beforeToolBatch,
 			afterToolBatch: this.afterToolBatch,
 			onModelRevision: this.onModelRevision,
-			shouldStopAfterTurn: shouldStopAfterTurn
-				? async (context) => await shouldStopAfterTurn(context, this.signal)
-				: undefined,
+			finishTurn: this.finishTurn,
+			prepareRequest: this.prepareRequest,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {

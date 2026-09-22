@@ -447,19 +447,17 @@ function defaultIsMutatingToolCall(toolName: string): boolean {
 }
 
 /**
- * Short system-prompt convention block teaching the agent the
- * `<plan>...</plan>` + `<expected>...</expected>` requirement. Appended to
- * the system prompt once per turn while schema tracking is enabled.
+ * Body of the `schema_declaration_convention` system-prompt section teaching the
+ * agent the `<plan>...</plan>` + `<expected>...</expected>` requirement. Present
+ * while schema tracking is enabled; the prompt renderer adds the surrounding tag.
  */
 export const SCHEMA_DECLARATION_CONVENTION = [
-	"<schema_declaration_convention>",
 	"Before any tool batch that mutates state (bash, edit, write), your preceding text MUST include BOTH:",
 	"  - <plan> ... </plan>   — what you intend to do in this batch",
 	"  - <expected> ... </expected> — the observable outcome you will use to certify success",
 	"Both tags MUST have their opening AND closing forms (e.g. <plan>text</plan>, not <plan>text). Missing closing tags cause the batch to be rejected.",
 	"You MUST include the tool calls in the SAME response as these tags. Do not declare first then wait; declare AND act in one turn.",
 	"A mutating batch without both complete blocks will be rejected and you will be asked to declare before retrying.",
-	"</schema_declaration_convention>",
 ].join("\n");
 
 function buildRevisionMessage(plan: string, expected: string, actual: string): string {

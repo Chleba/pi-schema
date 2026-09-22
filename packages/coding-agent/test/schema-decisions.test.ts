@@ -47,7 +47,7 @@ function makeToolResult(text: string): AgentToolResult<unknown> {
 	return { content: [{ type: "text", text }], details: {} } as AgentToolResult<unknown>;
 }
 
-const EMPTY_CONTEXT: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+const EMPTY_CONTEXT: AgentContext = { messages: [], tools: [] };
 
 describe("Schema Decision Tracking", () => {
 	describe("SessionManager.appendDecision", () => {
