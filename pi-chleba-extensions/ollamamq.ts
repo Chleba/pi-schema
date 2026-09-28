@@ -10,7 +10,8 @@
  * `/admin/models` is unavailable (older proxy builds).
  *
  * Embedding models reported by backends are filtered out (they cannot serve
- * chat completions).
+ * chat completions), as are CLM / SystemOne ids: those backends are non-generative
+ * typed-decision servers with no chat endpoint at all.
  *
  * The inventory is re-fetched whenever pi refreshes its model catalogs
  * (/model), so models on backends that come online later appear without a
@@ -117,6 +118,23 @@ function isEmbeddingModel(id: string): boolean {
 	return /embedding|embed/i.test(id);
 }
 
+// CLM / SystemOne backends are non-generative typed-decision servers: their only endpoint is
+// POST /v1/systemone, which returns a decision, never a completion. A chat request against
+// one of these ids can therefore never succeed, so they must not reach the model picker.
+// /v1/models reports no backend `api`, so the id itself is the only signal available there.
+const NON_GENERATIVE_MODEL_PATTERN = /(^|[-/:._])clm([-/:._]|$)|system[-_. ]?one/i;
+
+/** SystemOne/CLM server `api` tag from /admin/models; authoritative when present. */
+const NON_GENERATIVE_API_PATTERN = /system[-_. ]?one/i;
+
+function isNonGenerativeModelId(id: string): boolean {
+	return NON_GENERATIVE_MODEL_PATTERN.test(id);
+}
+
+function isNonGenerativeApi(api: string | undefined): boolean {
+	return NON_GENERATIVE_API_PATTERN.test(api ?? "");
+}
+
 async function fetchAdminModelIds(signal?: AbortSignal): Promise<string[]> {
 	const res = await fetch(`${BASE_URL}/admin/models`, {
 		headers: authHeaders(),
@@ -127,8 +145,11 @@ async function fetchAdminModelIds(signal?: AbortSignal): Promise<string[]> {
 	const ids = new Set<string>();
 	for (const backend of backends) {
 		if (!backend.online) continue;
+		// Drop the whole backend: the `api` tag is the authoritative discriminator, the id
+		// pattern below only backstops backends that mislabel themselves.
+		if (isNonGenerativeApi(backend.api)) continue;
 		for (const id of backend.available_models ?? []) {
-			if (id && !isEmbeddingModel(id)) ids.add(id);
+			if (id && !isEmbeddingModel(id) && !isNonGenerativeModelId(id)) ids.add(id);
 		}
 	}
 	return [...ids].sort();
@@ -143,7 +164,8 @@ async function fetchV1ModelIds(signal?: AbortSignal): Promise<string[]> {
 	const payload = (await res.json()) as { data?: { id?: string }[] };
 	return (payload.data ?? [])
 		.map((model) => model.id)
-		.filter((id): id is string => Boolean(id) && !isEmbeddingModel(id))
+		.filter((id): id is string => typeof id === "string" && id.length > 0)
+		.filter((id) => !isEmbeddingModel(id) && !isNonGenerativeModelId(id))
 		.sort();
 }
 

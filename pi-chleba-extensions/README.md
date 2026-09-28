@@ -64,7 +64,10 @@ back to `/v1/models`) and registers every model available on any online
 backend under the `ollamamq` provider. The list is re-fetched whenever pi
 refreshes its catalogs (`/model`), so models on backends that come online later
 appear without a restart. Embedding models are filtered out, and vision support
-is detected heuristically from the model id (same rules as lmstudio).
+is detected heuristically from the model id (same rules as lmstudio). Models
+served by non-generative SystemOne/CLM backends (`clm-latest`, `clm-raw`) are
+excluded from the model list because they answer only `POST /v1/systemone` and
+can never serve a chat completion.
 
 Env vars (optional):
 
