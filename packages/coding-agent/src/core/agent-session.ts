@@ -277,6 +277,9 @@ export interface AgentSessionConfig {
 	 *
 	 * These are synthesized into minimal ToolDefinitions internally so AgentSession can keep
 	 * a definition-first registry even when callers provide plain AgentTool instances.
+	 *
+	 * The caller owns this tool set, so the schema-decision flag does not activate the `decisions`
+	 * tool for an override: it stays registered but inactive until the embedder activates it.
 	 */
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
@@ -497,6 +500,7 @@ export class AgentSession {
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
+			activateSchemaExtras: true,
 		});
 		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
 	}
@@ -3652,6 +3656,8 @@ export class AgentSession {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
+		/** Activate the schema-decision tools in the INITIAL loadout. Only the constructor sets this. */
+		activateSchemaExtras?: boolean;
 	}): void {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
@@ -3708,10 +3714,33 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", ...schemaActiveExtras];
+			: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+		// Activating the schema-decision tools happens here, where the initial loadout is resolved:
+		// `sdk.ts` always hands the constructor a concrete list, so registering the tool above is not
+		// enough to declare it. Only `activateSchemaExtras` callers (the constructor) get it; `reload()`
+		// deliberately omits the flag because it feeds the current loadout back in — a still-active
+		// tool already arrives through `getActiveToolNames()`, and one the user deactivated during the
+		// session (`/tools`, `pi.setActiveTools`, `setActiveToolsByName`) must stay deactivated.
+		// Remaining guards keep explicit user intent on the initial loadout:
+		// - `_isAllowedTool` is the existing permission check, so a `tools` allowlist, an
+		//   `excludeTools` entry, or `noTools: "all"` (which sets an empty allowlist) keeps it off.
+		// - `_baseToolsOverride` means the embedder owns the base tool set; see that option's doc.
+		// - an empty incoming loadout means no built-in tools at all (`noTools: "builtin"`, an empty
+		//   `defaultTools` setting). A narrowed but non-empty one (for example `defaultTools: ["read"]`)
+		//   still gets the extras: opting into the flag is what opts into the tool, and `excludeTools`
+		//   is the supported way to keep it out of a narrowed loadout.
+		// - the `includes` check keeps this idempotent when the caller already listed the tool.
+		const activeToolNames = [...baseActiveToolNames];
+		if (options.activateSchemaExtras && !this._baseToolsOverride && activeToolNames.length > 0) {
+			for (const extraName of schemaActiveExtras) {
+				if (!activeToolNames.includes(extraName) && this._isAllowedTool(extraName)) {
+					activeToolNames.push(extraName);
+				}
+			}
+		}
 		this._refreshToolRegistry({
-			activeToolNames: baseActiveToolNames,
+			activeToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
 	}

@@ -41,19 +41,41 @@ export interface DecisionPlanId {
 	label: string;
 	plan: string;
 	expected: string;
-	/** True when at least one tool in the batch is mutating (write/edit/bash). */
+	/** True when at least one tool in the batch is mutating (see {@link MUTATING_TOOL_NAMES}). */
 	mutating: boolean;
 	/** True when both `<plan>...</plan>` and `<expected>...</expected>` were present. */
 	declared: boolean;
 }
 
 /**
- * Mutating tool names under the built-in tool set. Read-only batches
- * (read/grep/find/ls) don't require an explicit declaration — there is no
- * state to revise. A batch is treated as mutating if any of its tool calls
- * is in this list. Callers can override via `isMutatingToolCall`.
+ * Tool names whose calls can change state, so a batch containing one must carry an explicit
+ * declaration. The rule is behavioral, not a curated list: a tool that can mutate state belongs in
+ * this set, because an undeclared mutation is exactly what the deliberation gate exists to catch;
+ * a tool that cannot mutate state stays out, since there is nothing to revise and demanding a
+ * declaration for it only costs a turn.
+ *
+ * Built-ins are enumerated from `ToolName`/`allToolNames` in `core/tools/index.ts` (pi 1.0.0:
+ * `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`):
+ * - mutating: `bash`, `powershell` (shell execution), `edit`, `write` (filesystem writes)
+ * - read-only, deliberately absent: `read`, `grep`, `find`, `ls`, and the read-only `decisions`
+ *   tool registered while this feature is on
+ * - `codemode` is not a `ToolName`; it is the built-in extension tool
+ *   (`src/extensions/codemode/tool.ts`, `CODEMODE_TOOL_NAME`) and counts as mutating because a
+ *   script reaches `edit`/`write`/`bash` through `ctx.executeTool()`. Those nested calls never
+ *   appear in the model's tool batch, so the script call itself carries the classification.
+ *
+ * Extension and MCP tool names are not enumerable here; callers that register mutating tools of
+ * their own override `isMutatingToolCall`. A batch is mutating if any of its calls is.
  */
-export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write"]);
+export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "powershell", "edit", "write", "codemode"]);
+
+/**
+ * {@link MUTATING_TOOL_NAMES} in sorted order. Every model-facing string that enumerates the
+ * mutating tools renders this constant instead of hand-listing names, so the instruction can
+ * never drift from the enforcement set again when upstream adds a tool; sorting keeps the
+ * rendered prompt byte-stable for tests.
+ */
+export const MUTATING_TOOL_NAMES_SORTED: readonly string[] = [...MUTATING_TOOL_NAMES].sort();
 
 /** Session-like target for `appendDecision`. Use {@link createSchemaDecisionHooks} for the default. */
 export type DecisionRecorder = Pick<SessionManager, "appendDecision">;
@@ -427,7 +449,7 @@ function buildDeclarationRequiredMessage(): string {
 		"",
 		"Your previous tool batch would mutate files or run stateful commands, but it did not include an explicit plan. Premise of deliberation before action: state what you intend and what you expect, *then* act — in the SAME response.",
 		"",
-		"Before any batch that includes `bash`, `edit`, or `write`, your preceding text MUST contain BOTH:",
+		`Before any batch that includes a mutating tool (${MUTATING_TOOL_NAMES_SORTED.map((name) => `\`${name}\``).join(", ")}), your preceding text MUST contain BOTH:`,
 		"  - `<plan> ... </plan>` — a short description of the action(s) you intend, and",
 		"  - `<expected> ... </expected>` — the observable outcome you will use to certify success (command exit code, file contents, test result, etc.).",
 		"",
@@ -452,7 +474,7 @@ function defaultIsMutatingToolCall(toolName: string): boolean {
  * while schema tracking is enabled; the prompt renderer adds the surrounding tag.
  */
 export const SCHEMA_DECLARATION_CONVENTION = [
-	"Before any tool batch that mutates state (bash, edit, write), your preceding text MUST include BOTH:",
+	`Before any tool batch that mutates state (${MUTATING_TOOL_NAMES_SORTED.join(", ")}), your preceding text MUST include BOTH:`,
 	"  - <plan> ... </plan>   — what you intend to do in this batch",
 	"  - <expected> ... </expected> — the observable outcome you will use to certify success",
 	"Both tags MUST have their opening AND closing forms (e.g. <plan>text</plan>, not <plan>text). Missing closing tags cause the batch to be rejected.",

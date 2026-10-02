@@ -43,6 +43,8 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 
 Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. `defaultTools` can also name `codemode` and `tool_search`, which built-in extensions register inactive, and other extension tools registered inactive.
 
+With the schema-decision flags (`PI_SCHEMA_DECISIONS=1` or `PI_EXPERIMENTAL=1`), the `decisions` tool is activated on top of `defaultTools`. A `-decisions` entry does not suppress it; the supported way to keep it off is `excludeTools` (`--exclude-tools decisions`).
+
 A list of only `+name` and `-name` entries changes the inherited selection instead of replacing it. For example, this enables `codemode` next to the default tools:
 
 ```json

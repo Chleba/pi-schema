@@ -9,7 +9,10 @@ export default mergeConfig(
 			environment: "node",
 			testTimeout: 30000,
 			// Tests run offline by default; opt in with allowNetwork() from test/test-network-env.ts.
-			env: { PI_OFFLINE: "1" },
+			// PI_EXPERIMENTAL/PI_SCHEMA_DECISIONS are pinned off so a developer's own shell flags do
+			// not change tool selection or tool sampling under test (test.sh hides this with `env -i`).
+			// Tests that need them on set them explicitly (vi.stubEnv or process.env).
+			env: { PI_EXPERIMENTAL: "0", PI_OFFLINE: "1", PI_SCHEMA_DECISIONS: "0" },
 			unstubEnvs: true,
 			reporters: process.env.GITHUB_ACTIONS ? ["dot", "github-actions"] : ["dot"],
 			silent: "passed-only",
