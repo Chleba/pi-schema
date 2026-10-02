@@ -2,7 +2,7 @@ import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } f
 import { renderLatex } from "../latex.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 // Special markers for schema declarations (<plan> and <expected> tags)
 // These are replaced with HTML-like markers that the markdown renderer can style
@@ -272,6 +272,10 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	// Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
+	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
+	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
+	private cachedTokens?: WeakRef<{ source: string; tokens: Token[] }>;
 
 	constructor(
 		text: string,
@@ -326,9 +330,15 @@ export class Markdown implements Component {
 		// Pre-process schema declarations (<plan> and <expected> tags)
 		const processedText = preprocessSchemaDeclarations(normalizedText);
 
-		// Parse markdown to HTML-like tokens
-		const tokens = markdownParser.lexer(processedText);
-		trimPartialClosingFences(tokens);
+		// Parse markdown to HTML-like tokens. The cache key is the processed source, which is what the
+		// lexer actually sees, so schema-declaration markers cannot desync a cache hit from its tokens.
+		const cached = this.cachedTokens?.deref();
+		let tokens = cached?.source === processedText ? cached.tokens : undefined;
+		if (!tokens) {
+			tokens = markdownParser.lexer(processedText);
+			trimPartialClosingFences(tokens);
+			this.cachedTokens = new WeakRef({ source: processedText, tokens });
+		}
 
 		// Convert tokens to styled terminal output
 		const renderedLines: string[] = [];
@@ -391,6 +401,7 @@ export class Markdown implements Component {
 
 		// Combine top padding, content, and bottom padding
 		const result = emptyLines.concat(contentLines, emptyLines);
+		flattenLines(result);
 
 		// Update cache
 		this.cachedText = this.text;
