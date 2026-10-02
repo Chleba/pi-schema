@@ -1067,8 +1067,8 @@ interface SchemaRevisionMessage {
 	timestamp: number;
 }
 
-function createSchemaRevisionMessage(text: string): SchemaRevisionMessage {
-	return {
+function createSchemaRevisionMessage(text: string): AgentMessage {
+	const message: SchemaRevisionMessage = {
 		role: "custom",
 		customType: SCHEMA_REVISION_CUSTOM_TYPE,
 		content: [{ type: "text", text }],
@@ -1076,4 +1076,15 @@ function createSchemaRevisionMessage(text: string): SchemaRevisionMessage {
 		details: undefined,
 		timestamp: Date.now(),
 	};
+	// Assertion, not a workaround to delete: the `custom` member of `CustomAgentMessages` is
+	// declared by a `declare module "@earendil-works/pi-agent-core"` augmentation in
+	// packages/coding-agent/src/core/messages.ts. `npm run check` compiles every package as one
+	// program so it sees that augmentation, but `npm run build` compiles this package alone
+	// (packages/agent/tsconfig.build.json includes only src/), where `CustomAgentMessages` is
+	// empty and `AgentMessage` collapses to the built-in `Message` union. Without the assertion
+	// the isolated build rejects `role: "custom"`. Safe because every runtime consumer of this
+	// loop registers `custom`, and the loop never inspects the message: it only emits it and
+	// appends it, leaving `convertToLlm` to map the role. Removing it breaks the build while
+	// `npm run check` stays green.
+	return message as unknown as AgentMessage;
 }
