@@ -56,7 +56,7 @@ interface AdminBackend {
 }
 
 const VISION_MODEL_PATTERN =
-	/(^|[-/._])vl([-/._]|$)|vlm|internvl|llava|vision|multimodal|omni|pixtral|gemma-?3|minicpm-v|moondream|smolvlm|idefics|cogvlm|glm-4v|qwen3|step1v|step3-vision|llama-?3\.2-(11b|90b)|mistral-small-?3\.2|phi-?4-multimodal|ovis/i;
+	/(^|[-/._])vl([-/._]|$)|vlm|internvl|llava|vision|multimodal|omni|pixtral|gemma-?3|minicpm-v|moondream|smolvlm|idefics|cogvlm|glm-4v|glm[-_.]?5\.3|qwen3|step1v|step3-vision|llama-?3\.2-(11b|90b)|mistral-small-?3\.2|phi-?4-multimodal|ovis/i;
 
 function splitList(value: string | undefined): string[] {
 	return (value ?? "")
