@@ -32,6 +32,8 @@
  *   OLLAMA_MQ_TEXT_ONLY_MODELS=ids     force vision OFF (checked first)
  *   OLLAMA_MQ_REASONING_MODELS=ids     force reasoning ON (substring match on id)
  *   OLLAMA_MQ_NON_REASONING_MODELS=ids force reasoning OFF (checked first)
+ *   OLLAMA_MQ_EFFORT_MODELS=ids        force graded reasoning_effort ON (substring match on
+ *                                      id); otherwise only glm-5.x ids get graded effort
  */
 
 import { hostname } from "node:os";
@@ -80,7 +82,7 @@ function hasVision(id: string): boolean {
 //   qwen[-.]3 / 3.5 / 3.8 | deepseek(-...)-r1 | think(er) incl. rwkv-thinker | gemma-4
 //   gpt-oss | minimax-m2 | kimi(-k2) | glm-4.5 / glm-4.6 | hermes | nova | command-a | internlm
 const REASONING_MODEL_PATTERN =
-	/qwen[-_.]?3|deepseek[-\w.]*r1|think|gemma-?4|gpt-oss|minimax[-_.]?m2|kimi|glm[-_.]?4[-_.]?[56]|hermes|nova|command-a|internlm/i;
+	/qwen[-_.]?3|deepseek[-\w.]*r1|think|gemma-?4|gpt-oss|minimax[-_.]?m2|kimi|glm[-_.]?4[-_.]?[56]|glm[-_.]?5|hermes|nova|command-a|internlm/i;
 
 function supportsReasoning(id: string): boolean {
 	const lower = id.toLowerCase();
@@ -91,6 +93,21 @@ function supportsReasoning(id: string): boolean {
 		return true;
 	}
 	return REASONING_MODEL_PATTERN.test(lower);
+}
+
+// Backends that accept OpenAI-style graded `reasoning_effort` (none/low/medium/high/max).
+// Verified against the glm-5.3-flash backend through the dispatcher: none/low return no
+// thinking, medium/high/max think with growing depth, and thinking streams back as
+// `reasoning` deltas (which pi's openai-completions parser consumes). Opt other ids in
+// with OLLAMA_MQ_EFFORT_MODELS.
+const EFFORT_MODEL_PATTERN = /glm[-_.]?5/i;
+
+function supportsGradedEffort(id: string): boolean {
+	const lower = id.toLowerCase();
+	if (splitList(process.env.OLLAMA_MQ_EFFORT_MODELS).some((entry) => lower.includes(entry))) {
+		return true;
+	}
+	return EFFORT_MODEL_PATTERN.test(lower);
 }
 
 /** Parse "id=value,id=value" env maps into a lowercase-keyed number map. */
@@ -182,6 +199,27 @@ function buildModels(ids: string[]) {
 			maxTokens: MODEL_MAXTOK.get(id.toLowerCase()) ?? MAX_TOKENS,
 		};
 		if (!reasoning) return model;
+		if (supportsGradedEffort(id)) {
+			// Graded-effort backend: pi's default "openai" thinking format sends top-level
+			// reasoning_effort; off maps to "none" (verified to disable thinking). minimal/
+			// xhigh have no backend equivalent and stay hidden.
+			return {
+				...model,
+				thinkingLevelMap: {
+					off: "none",
+					minimal: null,
+					low: "low",
+					medium: "medium",
+					high: "high",
+					xhigh: null,
+					max: "max",
+				} as const,
+				compat: {
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: true,
+				} as const,
+			};
+		}
 		// This backend only speaks the Qwen chat-template thinking switch:
 		// chat_template_kwargs { enable_thinking: <bool>, preserve_thinking: true } toggles
 		// `reasoning_content` on/off (verified against the dispatcher, streaming included).
