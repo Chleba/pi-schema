@@ -22,7 +22,7 @@ git remote -v
 | Session integration | `packages/coding-agent/src/core/{agent-session.ts,session-manager.ts,sdk.ts,slash-commands.ts}` — hooks install, auto-continuation nag, `/decisions` command, decisions tool registration in `_baseToolDefinitions` + default active tools |
 | System-prompt digest | `agent-session.ts` `_schemaDecisionPromptSections()` injected into `options.sections` at both prompt-build seams (per-turn `prepareNextTurnWithContext` and the run's first request). Since 0.87.0 the prompt is structured sections in the transcript, not `AgentContext.systemPrompt`; `SessionManager.getRecentDecisionsDigestBody()` supplies the untagged body (`getRecentDecisionsDigest()` keeps the wrapped flat form for tests), and `SCHEMA_DECLARATION_CONVENTION` is untagged too |
 | Feature flag | `packages/coding-agent/src/core/experimental.ts` — must export BOTH `isSchemaDecisionTrackingEnabled()` (fork) and upstream's exports (`areExperimentalFeaturesEnabled`, `getExperimentalToolSampling`) |
-| TUI rendering | `modes/interactive/components/{decision-entry.ts,index.ts}`, `interactive-mode.ts` (`RenderSessionItem` union, `isDecisionSessionEntry`, decision branch in `renderSessionEntries`, `addDecisionEntryToChat`), theme files incl. `theme/theme-json.ts` (plan/expected colors live in the schema there since upstream moved `ThemeJsonSchema` out of `theme.ts` into the lazy validator) |
+| TUI rendering | `modes/interactive/components/{decision-entry.ts,index.ts}`, `interactive-mode.ts` (`RenderSessionItem` union, `isDecisionSessionEntry`, decision branch in `renderSessionEntries`, `addDecisionEntryToChat`), theme files: since 1.2.0 the plan/expected colors are entries in `THEME_TOKENS` (`theme/theme-tokens.ts`) — `ThemeColor`/`ThemeBg` derive via `keyof typeof THEME_TOKENS` and `theme-schema.ts` validates with `additionalProperties: false`, so missing tokens break theme validation; upstream deleted `theme-json.ts` in 1.2.0 |
 | Tests / docs | `packages/coding-agent/test/schema-decisions.test.ts`, `docs/schema-harness-improvements.md`, `localbench.ts` |
 
 ## Procedure
@@ -63,15 +63,14 @@ git remote -v
 
 7. **Commit the merge:** `PI_ALLOW_LOCKFILE_CHANGE=1 git commit` (pre-commit blocks lockfile changes without it; explicit paths only).
 
-8. **Bump workspace one minor above upstream** (fork convention, e.g. 0.84.2 → 0.85.0): update `"version"` AND every `@earendil-works/pi-*` dep range (`^X.Y.Z`) in all `packages/**/package.json`, then
+8. **Bump workspace one minor above upstream** (fork convention, e.g. 1.2.0 → 1.3.0): update `"version"` AND every internal `@earendil-works/*` dep in all `packages/**/package.json`. Since 1.2.0 upstream pins internal deps to EXACT versions (no caret) and not all carry the `pi-` prefix (e.g. `@earendil-works/chord`) — rewrite both `"@earendil-works/pi-X": "1.2.0"` and `"@earendil-works/chord": "1.2.0"` style entries, then
    ```bash
    npm install --ignore-scripts
    node scripts/generate-coding-agent-install-lock.mjs
-   node scripts/generate-coding-agent-shrinkwrap.mjs
    npm run check   # must stay green
    PI_ALLOW_LOCKFILE_CHANGE=1 git commit -m "chore: bump workspace to X.Y.0"
    ```
-   Root `package.json` stays at its own version (0.0.x).
+   Root `package.json` stays at its own version (0.0.x). `npm-shrinkwrap.json` and its generator script were deleted upstream in 1.2.0 — only install-lock remains.
 
 9. **Push:** user pushes `main` to origin.
 
@@ -92,3 +91,6 @@ git remote -v
 - 0.87.0 added workspace packages `durable` and `session-backends/sqlite-node` — include them in the version bump. `packages/coding-agent/examples/extensions/*` are workspace members but have no `@earendil-works/pi-*` deps, so the fork leaves them at upstream's version.
 - `interactive-mode.ts`: `RenderSessionItem` now also carries `usage` (cache_warm) entries and the `entry_appended` chain has usage/custom_message/compaction branches — our `decision` branch needs its own `this.ui.requestRender()`, because the shared trailing one belongs to the last branch.
 - If sub-agent delegation (orch workers) is down, do the merge directly in the main session — it is mechanical except for the 2–4 code-conflict files. (Observed 2026-09: worker sessions stalled after their first turn twice in a row; direct execution of the 0.85.1 sync took one pass.)
+- 1.2.0 sync: upstream replaced the lazy `theme-json.ts` validator with `theme-schema.ts` + token-driven `theme-tokens.ts` (`THEME_TOKENS`). Port the plan/expected colors as THEME_TOKENS entries (`planBg`/`expectedBg` slot `"background"`, the rest `"foreground"`); `ThemeColor`/`ThemeBg` derive from the token keys, and `theme-schema.ts` rejects unknown colors (`additionalProperties: false`), so the dark.json/light.json entries fail validation without the tokens. `main.ts` imports `validateThemeJson` from `theme-schema.ts` and auto-merge resolves it — just `git rm theme-json.ts`.
+- 1.2.0 sync: upstream refactored the run's first-request seam into `_prepareRun()` (called from `_startRun`); the `_schemaDecisionPromptSections()` injection goes right before `_preparePromptAndToolLoadout(result.systemPromptOptions)` there. The old post-`_startRun` block (`handlerEditedTools`, message building) moved verbatim into `_prepareRun` — take upstream's side of that conflict wholesale (upstream side is empty; delete the HEAD block, then re-inject only the Object.assign).
+- 1.2.0 sync: upstream deleted `npm-shrinkwrap.json` + its generator and the `protocol`/`server` packages; internal deps are pinned to exact versions and include non-`pi-`-prefixed packages (`@earendil-works/chord`). A bump sed that only rewrites `@earendil-works/pi-*` leaves chord at the old version and `npm install` fails with ETARGET — `.npmrc` `min-release-age=2` blocks registry resolution of just-published versions, so the workspace link is the only valid resolution.
