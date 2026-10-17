@@ -281,13 +281,25 @@ Context derivation:
    fork cut or at an interrupted tail. Drop tool results with no preceding call.
 9. Exclude model-less entries and assistant messages with `aborted`, `error`, or
    `deferred` stop reasons from future provider requests.
-10. Move a system message that only user messages precede to the front. A
-    run's input is committed before generation renders the system prompt, so a
-    transcript, or the range after a compaction or reset, otherwise starts with
-    the input. Providers treat only a leading system message as the initial
-    prompt and tool set; without one, a later tool change rewrites the
-    request's tool list and invalidates the whole prompt cache. Stored entries
-    and `contributions` keep the committed order.
+10. Move the first system message to the front when only user messages
+    precede it, or when it is the baseline's: the first `pi.system` entry after
+    `H`, unless an edit targets it. Generation writes it with every section and
+    tool in effect before the first request after a compaction or reset, and
+    omits the retained `pi.system` entries. Without `H`, the first `pi.system`
+    entry is the baseline unless an earlier entry carries a system message, in
+    its messages or an edit's replacement, even one an edit omits later: only
+    then did generation write it with every section and tool in effect, before
+    the first request or once an agent without any gets one. A run's input
+    is committed before generation renders the system prompt, so the context
+    otherwise starts with the input, or with the kept history, assistant
+    messages included. Providers treat only a leading system message as the
+    initial prompt and tool set; without one, a later tool change rewrites the
+    request's tool list and invalidates the whole prompt cache. Only the first
+    system message moves, so replay gives the same sections and tools. Any other
+    system message with an assistant message before it stays in place, since
+    moving it would change what it means; a retained system message of another
+    kind ahead of the baseline therefore keeps the baseline from leading.
+    Stored entries and `contributions` keep the committed order.
 
 Views carry raw active entries. UI reduction and model-context reduction are
 separate consumers. Older stored history is available through the owning
@@ -347,9 +359,11 @@ type AnyTask = {
 };
 
 type HarnessOptions<Tool extends ToolRegistration = ToolRegistration> = {
-  readonly models: Models; // the pi-ai Models interface
+  /** The pi-ai Models interface, or a function returning the current one, called at each use. */
+  readonly models: Models | (() => Models);
   readonly registry: RegistryReader<Tool>; // section 7.1
-  readonly settings?: HarnessSettings;
+  /** Run settings, or a function returning the current ones; read at each use either way. */
+  readonly settings?: HarnessSettings | (() => HarnessSettings | undefined);
   /** Builds a conversation's environment. Never called on the Session line; may be async. */
   readonly env?: (
     target: { readonly conversationId: ConversationId; readonly cwd?: string; readonly read: DocumentReader },
@@ -396,6 +410,14 @@ type CompactionPolicy = {
   backgroundTokens: number;
 };
 
+/**
+ * `modelOverrides` is keyed by exact `"provider/modelId"`; each field it sets replaces the harness-wide one for that
+ * model. Readers resolve the policy for the model they act for (see the reader table below).
+ */
+type CompactionSettings = Partial<CompactionPolicy> & {
+  readonly modelOverrides?: Readonly<Record<string, Partial<CompactionPolicy>>>;
+};
+
 type ToolExecutionMode = "parallel" | "sequential";
 
 /** How many queued items of one mode a boundary selects (section 6). */
@@ -407,7 +429,7 @@ type HarnessSettings = {
   readonly extensions?: readonly Extension[];
   readonly stream?: ConversationStreamOptions;
   readonly retry?: Partial<ConversationRetryPolicy>;
-  readonly compaction?: Partial<CompactionPolicy>;
+  readonly compaction?: CompactionSettings;
   readonly toolExecution?: ToolExecutionMode;
   readonly steeringMode?: QueueMode;
   readonly followUpMode?: QueueMode;
@@ -422,7 +444,7 @@ type Settings = {
   readonly extensions?: readonly Extension[]; // default: every installed extension, in install order
   readonly stream: ConversationStreamOptions; // default {}
   readonly retry: ConversationRetryPolicy; // { enabled: true, maxRetries: 3, baseDelayMs: 2000, maxAgentDelayMs: 60000 }
-  readonly compaction: CompactionPolicy; // { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000, backgroundTokens: 32768 }
+  readonly compaction: CompactionPolicy & Pick<CompactionSettings, "modelOverrides">; // { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000, backgroundTokens: 32768 }
   readonly toolExecution: ToolExecutionMode; // "parallel"
   readonly steeringMode: QueueMode; // "one-at-a-time"
   readonly followUpMode: QueueMode; // "one-at-a-time"
@@ -799,8 +821,11 @@ selection, request options, retry, compaction thresholds, tool execution, and
 queue modes. Nothing copies or stores it. Every reader resolves it anew into
 `Settings`, each absent field over its built-in default and object fields merged
 key by key, and uses that value for one decision (section 7.1 lists the
-readers). A settings object with getters therefore follows the user's
-preferences without a Session write. Settings are synchronous because queue
+readers). A settings object with getters, or a `settings` function, therefore
+follows the user's preferences without a Session write. `models` works the same
+way: a function is called at each use (generation and compaction requests,
+`runtime.models`, `api.models` of hooks and tools at each access), so a host can
+replace its model configuration without reopening the Harness. Settings are synchronous because queue
 modes are read on the Session line. `stream` is forwarded to generation
 requests; `stream.maxRetries` are provider retries inside one request, while
 `retry` governs durable generation attempts (section 8.3). Settings changes make
@@ -1732,6 +1757,7 @@ interface TaskRuntime<I, S, R, H extends object> extends DocumentObserver, Docum
   agent(context: Context): Promise<Agent>;
   /** `HarnessOptions.settings`, resolved at each access. */
   readonly settings: Settings;
+  /** `HarnessOptions.models`, resolved at each access. */
   readonly models: Models;
   readonly hooks: HookRunner<H>;
   /** Calls `HarnessOptions.env` for the task's conversation; rejects with its error. */
@@ -2651,12 +2677,13 @@ await conversation.configure({ extensions: { add: [Venv] } }, context);
 
 | reader | resolves | when |
 |---|---|---|
-| generation `prepare` | agent (tools, sections, model, thinking level), stream options, compaction thresholds | once per request; model, stream options, and offered tools are fixed in the request checkpoint (section 8.3) |
+| generation `prepare` | agent (tools, sections, model, thinking level), stream options, compaction thresholds for that model | once per request; model, stream options, and offered tools are fixed in the request checkpoint (section 8.3) |
 | every task phase | extension selection for hooks; `runtime.agent()` | at most once per phase handler, at its first hook dispatch or `agent()` call, from that phase's snapshot and the committed `pi.agent`, off the Session line, with the invocation's context; fixed for the rest of the phase |
 | tool task | the implementation of an accepted call | at `call` and `execute`: the name among the phase agent's `tools`, the current selection after the tools filter; no such tool, for example one removed after preparation: `tool_unavailable`. Replay policy on reopen uses the same lookup (section 7.3) |
 | generation, when a tool round starts | tool execution mode | once per round (section 8.3) |
 | generation, compaction | retry policy | at each attempt's classification |
-| compaction `select` | model, thinking level, stream options, compaction thresholds | once; the summary request stays pinned across its retries (section 8.7) |
+| generation, on a context overflow | compaction policy for the request's model | at classification |
+| compaction `select` | model, thinking level, stream options, compaction thresholds for that model | once; the summary request stays pinned across its retries (section 8.7) |
 | boundaries and idle admission, on the Session line | queue modes | per boundary (section 6) |
 | tool task, `prepare`, `runtime.env()` | environment | at each call (section 2.2) |
 
@@ -2698,6 +2725,7 @@ interface HookApi extends DocumentReader {
   readonly taskId: TaskId;
   readonly conversationId: ConversationId;
   /** `HarnessOptions.models`. */
+  /** The current `HarnessOptions.models`, read at each access. */
   readonly models: Models;
   memo<T extends JsonValue>(name: string, context: Context): Promise<T | undefined>;
   memo<T extends JsonValue>(name: string, candidate: T, context: Context): Promise<T>;
@@ -2837,6 +2865,7 @@ interface ToolExecutionApi<TDetails extends JsonValue = JsonValue> extends Docum
   /** The calling conversation's agent, as the tool task's phase resolved it. */
   agent(context: Context): Promise<Agent>;
   /** `HarnessOptions.models`: the catalog, credentials, and request transforms generation uses. */
+  /** The current `HarnessOptions.models`, read at each access. */
   readonly models: Models;
   /** Built by `HarnessOptions.env` for this call. */
   readonly env: ExecutionEnv | undefined;
