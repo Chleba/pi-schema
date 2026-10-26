@@ -260,10 +260,20 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerProvider("ollamamq", {
 		name: "ollamaMQ",
 		baseUrl: `${BASE_URL}/v1`,
+		// The dispatcher accepts unauthenticated requests. Keep apiKey always set (pi treats a
+		// provider without one as unauthenticated and blocks model selection), but only let pi
+		// add the Authorization header when a key is actually configured — pi rejects
+		// authHeader with an empty resolved API key.
 		apiKey: API_KEY,
-		authHeader: true,
+		...(API_KEY ? { authHeader: true } : {}),
 		api: "openai-completions",
-		headers: { "X-User-ID": USER_ID },
+		headers: {
+			"X-User-ID": USER_ID,
+			// pi's openai-completions client refuses requests that have neither an Authorization
+			// header nor a non-empty API key; the dispatcher ignores auth, so send a placeholder
+			// when no key is configured.
+			...(API_KEY ? {} : { Authorization: "Bearer anonymous" }),
+		},
 		models: currentModels,
 		refreshModels: async (context) => {
 			if (!context.allowNetwork || context.signal?.aborted) return currentModels;
