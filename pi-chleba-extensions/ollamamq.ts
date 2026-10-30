@@ -34,13 +34,20 @@
  *   OLLAMA_MQ_NON_REASONING_MODELS=ids force reasoning OFF (checked first)
  *   OLLAMA_MQ_EFFORT_MODELS=ids        force graded reasoning_effort ON (substring match on
  *                                      id); otherwise only glm-5.x ids get graded effort
+ *
+ * The proxy (v0.5.1+) attaches each backend's configured token itself and strips client
+ * credentials before forwarding, so this extension never needs backend keys.
  */
 
 import { hostname } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const BASE_URL = process.env.OLLAMA_MQ_BASE_URL ?? "http://192.168.1.27:11435";
+// No default key: ollamaMQ (v0.5.1+) attaches each backend's configured token itself and
+// strips client-supplied credentials before forwarding, so pi never needs backend keys.
+// Set OLLAMA_MQ_API_KEY only when the proxy itself runs with auth enabled.
 const API_KEY = process.env.OLLAMA_MQ_API_KEY ?? "";
+
 const USER_ID = process.env.OLLAMA_MQ_USER_ID ?? `pi-${hostname()}-${process.pid}`;
 const MAX_TOKENS = Number(process.env.OLLAMA_MQ_MAX_TOKENS) || 32768;
 const DEFAULT_CONTEXT_WINDOW = Number(process.env.OLLAMA_MQ_CONTEXT_WINDOW) || 262000;
@@ -80,7 +87,7 @@ function hasVision(id: string): boolean {
 // per-model capability metadata, so anything not matched here is registered as non-reasoning
 // and can be opted in with OLLAMA_MQ_REASONING_MODELS.
 //   qwen[-.]3 / 3.5 / 3.8 | deepseek(-...)-r1 | think(er) incl. rwkv-thinker | gemma-4
-//   gpt-oss | minimax-m2 | kimi(-k2) | glm-4.5 / glm-4.6 | hermes | nova | command-a | internlm
+//   gpt-oss | minimax-m2 | kimi(-k2) | glm-4.5 / glm-4.6 / glm-5.x | hermes | nova | command-a | internlm
 const REASONING_MODEL_PATTERN =
 	/qwen[-_.]?3|deepseek[-\w.]*r1|think|gemma-?4|gpt-oss|minimax[-_.]?m2|kimi|glm[-_.]?4[-_.]?[56]|glm[-_.]?5|hermes|nova|command-a|internlm/i;
 
@@ -193,7 +200,7 @@ function buildModels(ids: string[]) {
 			id,
 			name: id,
 			reasoning,
-			input: hasVision(id) ? (["text", "image"] as const) : (["text"] as const),
+			input: hasVision(id) ? (["text", "image"] as ("image" | "text")[]) : (["text"] as ("image" | "text")[]),
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: MODEL_CTX.get(id.toLowerCase()) ?? DEFAULT_CONTEXT_WINDOW,
 			maxTokens: MODEL_MAXTOK.get(id.toLowerCase()) ?? MAX_TOKENS,
@@ -260,25 +267,17 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerProvider("ollamamq", {
 		name: "ollamaMQ",
 		baseUrl: `${BASE_URL}/v1`,
-		// The dispatcher accepts unauthenticated requests. Keep apiKey always set (pi treats a
-		// provider without one as unauthenticated and blocks model selection), but only let pi
-		// add the Authorization header when a key is actually configured — pi rejects
-		// authHeader with an empty resolved API key.
-		apiKey: API_KEY,
-		...(API_KEY ? { authHeader: true } : {}),
+		// pi requires a resolvable API key per provider. The proxy strips client credentials
+		// before forwarding to backends, so this sentinel never reaches token-protected ones.
+		apiKey: API_KEY || "ollamamq-local",
+		authHeader: Boolean(API_KEY),
 		api: "openai-completions",
-		headers: {
-			"X-User-ID": USER_ID,
-			// pi's openai-completions client refuses requests that have neither an Authorization
-			// header nor a non-empty API key; the dispatcher ignores auth, so send a placeholder
-			// when no key is configured.
-			...(API_KEY ? {} : { Authorization: "Bearer anonymous" }),
-		},
+		headers: { "X-User-ID": USER_ID },
 		models: currentModels,
 		refreshModels: async (context) => {
 			if (!context.allowNetwork || context.signal?.aborted) return currentModels;
 			const timeout = AbortSignal.timeout(15000);
-			const signal = context.signal ? AbortSignal.any(context.signal, timeout) : timeout;
+			const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
 			let next: string[] | null = null;
 			try {
 				next = await fetchAdminModelIds(signal);
@@ -289,7 +288,7 @@ export default async function (pi: ExtensionAPI) {
 					console.warn(
 						`[ollamamq] refresh failed, keeping ${currentModels.length} model(s): ${
 							error instanceof Error ? error.message : String(error)
-						}`
+						}`,
 					);
 				}
 			}

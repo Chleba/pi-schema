@@ -62,11 +62,7 @@ export default async function (pi: ExtensionAPI) {
 	try {
 		models = await fetchModels();
 	} catch (error) {
-		console.warn(
-			`[lmstudio] could not reach ${BASE_URL}: ${
-				error instanceof Error ? error.message : String(error)
-			}`
-		);
+		console.warn(`[lmstudio] could not reach ${BASE_URL}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	pi.registerProvider("lmstudio", {
@@ -85,7 +81,7 @@ export default async function (pi: ExtensionAPI) {
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 						contextWindow: model.context_window ?? 128000,
 						maxTokens: model.max_tokens ?? MAX_TOKENS,
-				  }))
+					}))
 				: [
 						{
 							id: "local-model",
@@ -96,6 +92,6 @@ export default async function (pi: ExtensionAPI) {
 							contextWindow: 128000,
 							maxTokens: MAX_TOKENS,
 						},
-				  ],
+					],
 	});
 }

@@ -23,7 +23,7 @@ interface SearchResult {
 }
 
 function truncate(text: string, maxLen: number): string {
-	if (text && text.length > maxLen) return text.slice(0, maxLen) + "...";
+	if (text && text.length > maxLen) return `${text.slice(0, maxLen)}...`;
 	return text || "";
 }
 
@@ -41,11 +41,14 @@ function formatResults(query: string, results: SearchResult[]): string {
 	return out;
 }
 
-async function search(query: string, params: {
-	num_results?: number;
-	categories?: string;
-	language?: string;
-}): Promise<string> {
+async function search(
+	query: string,
+	params: {
+		num_results?: number;
+		categories?: string;
+		language?: string;
+	},
+): Promise<string> {
 	const searchParams = new URLSearchParams();
 	searchParams.set("q", query);
 	searchParams.set("format", "json");
@@ -60,7 +63,7 @@ async function search(query: string, params: {
 		return `SearXNG returned HTTP ${response.status} — check the SearXNG instance and URL. (URL: ${SEARXNG_URL})`;
 	}
 
-	const json = await response.json() as { results?: SearchResult[] };
+	const json = (await response.json()) as { results?: SearchResult[] };
 	return formatResults(query, json.results ?? []);
 }
 
@@ -71,23 +74,30 @@ const searxngSearchTool = defineTool({
 		"Search the web using your local SearXNG instance. Returns results with title, URL, source engine, and snippet. Use for documentation lookups, current events, libraries, APIs, etc.",
 	parameters: Type.Object({
 		query: Type.String({ description: "The search query." }),
-		num_results: Type.Optional(Type.Number({
-			description: "Max results to return. Default 10, max 50.",
-			minimum: 1,
-			maximum: 50,
-		})),
-		categories: Type.Optional(Type.String({
-			description: "Comma-separated categories: general, news, images, videos, movies, music, it, science, files, social media. Default: all.",
-		})),
-		language: Type.Optional(Type.String({
-			description: "Language code (e.g. 'en', 'de'). Default: SearXNG default.",
-		})),
+		num_results: Type.Optional(
+			Type.Number({
+				description: "Max results to return. Default 10, max 50.",
+				minimum: 1,
+				maximum: 50,
+			}),
+		),
+		categories: Type.Optional(
+			Type.String({
+				description:
+					"Comma-separated categories: general, news, images, videos, movies, music, it, science, files, social media. Default: all.",
+			}),
+		),
+		language: Type.Optional(
+			Type.String({
+				description: "Language code (e.g. 'en', 'de'). Default: SearXNG default.",
+			}),
+		),
 	}),
 
 	async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 		const typed = params as { query: string; num_results?: number; categories?: string; language?: string };
 		if (!typed?.query) {
-			return { content: [{ type: "text", text: "Error: query is required." }] };
+			return { content: [{ type: "text", text: "Error: query is required." }], details: undefined };
 		}
 		const result = await search(typed.query, typed);
 		return { content: [{ type: "text", text: result }], details: { query: typed.query } };
