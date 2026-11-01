@@ -1,0 +1,11 @@
+{
+  "lastChangelogVersion": "1.5.0",
+  "theme": "dark",
+  "defaultProvider": "ollamamq",
+  "defaultModel": "glm-5.3-flash",
+  "packages": [
+    "npm:pi-playwright",
+    "npm:pi-orch-extension",
+    "npm:pi-hermes-memory"
+  ]
+}

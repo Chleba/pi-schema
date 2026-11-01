@@ -1,0 +1,57 @@
+# Example module layout
+
+```text
+src/
+  main.rs
+  app/
+    mod.rs
+    states.rs
+    plugins.rs
+  game/
+    mod.rs
+    ids.rs
+    commands.rs
+    rules/
+      combat.rs
+      economy.rs
+      movement.rs
+  simulation/
+    mod.rs
+    clock.rs
+    schedule.rs
+    snapshots.rs
+  world/
+    mod.rs
+    map.rs
+    occupancy.rs
+    spatial_index.rs
+  units/
+    mod.rs
+    components.rs
+    systems.rs
+    orders.rs
+  buildings/
+    mod.rs
+    components.rs
+    construction.rs
+    production.rs
+  ai/
+    mod.rs
+    strategic.rs
+    tactical.rs
+  presentation/
+    mod.rs
+    sprites.rs
+    animation.rs
+    camera.rs
+  ui/
+    mod.rs
+    selection.rs
+    commands.rs
+  persistence/
+    mod.rs
+    save.rs
+  tests/
+```
+
+This is a starting point, not a mandate. Prefer the existing project's organization when it is coherent.

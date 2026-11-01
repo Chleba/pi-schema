@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RTS pixel-art asset manifest",
+  "type": "object",
+  "required": [
+    "id",
+    "file",
+    "kind",
+    "projection",
+    "source_size_px",
+    "pivot"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$"
+    },
+    "file": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "unit",
+        "building",
+        "terrain",
+        "resource",
+        "effect",
+        "ui"
+      ]
+    },
+    "projection": {
+      "enum": [
+        "top_down",
+        "three_quarter_top_down",
+        "isometric",
+        "side_on"
+      ]
+    },
+    "source_size_px": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "pivot": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "frame_size_px": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "frame_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "fps": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "palette_id": {
+      "type": "string"
+    },
+    "faction_variants": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "license": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

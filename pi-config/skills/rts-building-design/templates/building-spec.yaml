@@ -1,0 +1,47 @@
+id: crypt_hall
+display_name: Crypt Hall
+faction: necropolis
+footprint:
+  width: 4
+  height: 3
+placement:
+  terrain_tags: [ground]
+  requires_clear_footprint: true
+  adjacency: []
+economy:
+  costs:
+    stone: 180
+    essence: 60
+  build_ticks: 1800
+construction:
+  stages:
+    - id: foundation
+      at_progress: 0.0
+      sprite: buildings/crypt_hall/foundation.png
+    - id: frame
+      at_progress: 0.25
+      sprite: buildings/crypt_hall/frame.png
+    - id: shell
+      at_progress: 0.65
+      sprite: buildings/crypt_hall/shell.png
+    - id: complete
+      at_progress: 1.0
+      sprite: buildings/crypt_hall/complete.png
+combat:
+  max_health: 1600
+  armor: 5
+  blocks_movement: true
+production:
+  queue_capacity: 5
+  spawn_cells: [[4, 1], [4, 2]]
+  rally_point_supported: true
+art:
+  projection: three_quarter_top_down
+  canvas_px: [128, 96]
+  pivot_px: [64, 78]
+  palette: necropolis
+  damage_variants:
+    - threshold: 0.5
+      sprite: buildings/crypt_hall/damaged.png
+    - threshold: 0.2
+      sprite: buildings/crypt_hall/critical.png

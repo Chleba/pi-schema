@@ -1,0 +1,24 @@
+{
+  "roles": {
+    "worker": {
+      "provider": "ollamamq",
+      "model": "glm-5.3-flash"
+    },
+    "validator": {
+      "provider": "ollamamq",
+      "model": "glm-5.3-flash"
+    },
+    "smart_friend": {
+      "provider": "ollamamq",
+      "model": "glm-5.3-flash"
+    },
+    "research": {
+      "provider": "ollamamq",
+      "model": "glm-5.3-flash"
+    },
+    "plan_codebase": {
+      "provider": "ollamamq",
+      "model": "glm-5.3-flash"
+    }
+  }
+}

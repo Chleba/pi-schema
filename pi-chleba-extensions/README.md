@@ -23,8 +23,16 @@ compile step.
   per model or globally. Config stored at `~/.pi/agent/model-params.json`.
 - **omarchy-system-theme** — Syncs pi's light/dark theme with the active
   Omarchy desktop theme.
+- **searxng** — Registers a `searxng_search` web-search tool backed by the
+  user's local SearXNG instance (`SEARXNG_URL` env var, LAN default, with
+  fallback engines and unresponsive-engine reporting).
 
 ## Install
+
+> **One-step bootstrap:** `../pi-config/install.sh` now performs the full
+> setup — extensions, settings, model params, orch config, themes, skills, and
+> extensions-disabled — by symlinking the live `~/.pi/agent` into the repo.
+> The manual per-extension symlinks below still work and stay in sync with it.
 
 Install via symlink so `~/.pi/agent/extensions/` always points at the
 versioned files in this repo — edits here are picked up by pi immediately
@@ -33,10 +41,14 @@ versioned files in this repo — edits here are picked up by pi immediately
 ```bash
 mkdir -p ~/.pi/agent/extensions
 ln -sf "$(pwd)/pi-chleba-extensions/ollamamq.ts" ~/.pi/agent/extensions/
-ln -sf "$(pwd)/pi-chleba-extensions/lmstudio.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/model-params.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/omarchy-system-theme.ts" ~/.pi/agent/extensions/
+ln -sf "$(pwd)/pi-chleba-extensions/searxng.ts" ~/.pi/agent/extensions/
 ```
+
+Note: lmstudio is disabled — it lives in `pi-config/extensions-disabled/`
+(wired by `pi-config/install.sh`) and should not be symlinked into
+`extensions/` while ollamamq is active.
 
 Run from the repo root (`/home/chleba/Documents/pi-chleba`). To re-install
 after pulling changes, just re-run the `ln -sf` commands — they update the
@@ -49,9 +61,9 @@ symlink targets in place.
 
 ```bash
 rm -f ~/.pi/agent/extensions/ollamamq.ts \
-      ~/.pi/agent/extensions/lmstudio.ts \
       ~/.pi/agent/extensions/model-params.ts \
-      ~/.pi/agent/extensions/omarchy-system-theme.ts
+      ~/.pi/agent/extensions/omarchy-system-theme.ts \
+      ~/.pi/agent/extensions/searxng.ts
 ```
 
 ## Usage
