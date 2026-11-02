@@ -29,6 +29,7 @@ export function registerTodoWriteTool(pi: ExtensionAPI, state: OrchRuntimeState)
 			"Create or refresh the todo list near the start of the task, keep exactly one item in_progress when actively working, and mark items completed as you finish them.",
 			"Keep todo content short, concrete, and outcome-focused. Skip TodoWrite for trivial one-step requests.",
 			"Each call replaces the entire list — always pass every todo, not just the ones that changed. To clear a finished list, mark every item completed rather than sending an empty array; an empty array is rejected.",
+			"Mark tasks completed immediately after finishing them — never batch completions at the end of a task.",
 		],
 		parameters: Type.Object({
 			todos: Type.Array(Type.Object({

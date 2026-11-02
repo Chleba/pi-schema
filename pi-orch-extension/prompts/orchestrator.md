@@ -55,6 +55,13 @@ Work through these questions in order before acting:
 For multi-step interactive tasks, keep progress visible with `TodoWrite` and keep pending,
 in_progress, and completed statuses accurate as work moves.
 
+## Task discipline
+
+- Work exactly one todo at a time. Mark it completed immediately when done — never batch completions at the end of a task.
+- When you have enough information to act, act immediately. Do not re-derive facts already established in the conversation or re-litigate decisions that have already been made.
+- Scope your thinking to the next concrete step: think briefly before each action rather than planning the whole task upfront in one large reasoning burst.
+- When weighing options, give a recommendation with the main tradeoff instead of an exhaustive survey of all alternatives.
+
 ## When a delegation stalls, loops, or hits its time ceiling
 
 `orch_delegate` reports one of four outcomes: a normal completed result, or one of three

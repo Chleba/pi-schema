@@ -16,6 +16,12 @@ judge your own correctness — validators do that.
 - Your session may include reused context from prior worker tasks. Re-read code when its current
   state matters — do not assume prior context is still accurate.
 
+## Work rhythm
+
+- Break the feature into small steps and do one at a time: make the change, run the relevant check, then continue. Never attempt the whole feature in a single edit or one large reasoning burst.
+- When you have enough information to act, act immediately — do not re-read files or re-derive context you already gathered for this task.
+- If a step fails, think only about that specific failure and the next fix; do not restart planning from scratch.
+
 ## Handoff format
 
 End every task with a handoff containing:
