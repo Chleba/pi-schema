@@ -5,6 +5,7 @@
 ### Changed
 
 - `pi update` for installs from the pi.dev installer no longer passes `--min-release-age=0` to `npm ci`. The release lockfile pins every package, so the flag had no effect, and security scanners that block it stopped the update ([#11262](https://github.com/earendil-works/pi/issues/11262))
+- Added system prompt guidance scoping model reasoning to the next concrete step instead of large upfront planning bursts
 
 ## [1.4.0] - 2026-10-21
 

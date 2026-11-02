@@ -120,6 +120,15 @@ function buildRules(
 	}
 	for (const rule of promptGuidelines) addRule(rule);
 	addRule("Be concise in your responses");
+	addRule(
+		"When you have enough information to act, act immediately. Do not re-derive facts already established in the conversation or re-litigate decisions that have already been made.",
+	);
+	addRule(
+		"Scope your thinking to the next concrete step: think briefly before each tool call rather than planning the entire task upfront in one large reasoning burst.",
+	);
+	addRule(
+		"When weighing options, give a recommendation with the main tradeoff instead of an exhaustive survey of all alternatives.",
+	);
 	addRule("Show file paths clearly when working with files");
 	return rules.map((rule) => `- ${rule}`).join("\n");
 }
