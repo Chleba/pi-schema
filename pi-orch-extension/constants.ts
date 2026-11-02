@@ -1,0 +1,53 @@
+export const ORCH_EXTENSION_ID = "orch";
+export const ORCH_EXTENSION_NAME = "Orch";
+export const ORCH_EXTENSION_VERSION = "1.1.1";
+
+export const ORCH_COMMANDS = {
+	main: "orch",
+	goal: "goal",
+	start: "start",
+	model: "orch-model",
+	status: "orch-status",
+	reload: "orch-reload",
+	takeover: "orch-takeover",
+} as const;
+
+export const ORCH_CUSTOM_TYPES = {
+	event: "orch-event",
+} as const;
+
+export const GLYPHS = {
+	assistant: "⏺",
+	user: "❯",
+	recap: "※",
+	toolOut: "⎿",
+	boxTopLeft: "╭",
+	boxBottomLeft: "╰",
+	boxVert: "│",
+	done: "●",
+	pending: "○",
+	inProgress: "◆",
+	pass: "✓",
+	fail: "✗",
+	spinner: ["✻", "✽", "✦", "✶"] as const,
+	diffAdd: "+",
+	diffRemove: "-",
+	ellipsis: "…",
+} as const;
+
+export const ORCH_TOOL_NAMES = {
+	delegate: "orch_delegate",
+	parallel: "orch_parallel",
+	smartFriend: "orch_smart_friend",
+	todoWrite: "TodoWrite",
+	parallelSearch: "parallel_search",
+	parallelFetch: "parallel_fetch",
+} as const;
+
+export const ORCH_WIDGET_IDS = {
+	loadingIndicator: "orch-loading-indicator",
+	missionBlock: "orch-mission-block",
+	missionThinking: "orch-mission-thinking",
+	missionProgress: "orch-mission-progress",
+	todos: "orch-todos",
+} as const;

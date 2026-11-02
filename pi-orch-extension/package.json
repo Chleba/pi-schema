@@ -1,0 +1,39 @@
+{
+  "name": "pi-orch-extension",
+  "version": "1.1.1",
+  "type": "module",
+  "description": "Orch multi-agent orchestration extension for Pi",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "orch",
+    "orchestration",
+    "multi-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AryanBhargavprojects/pi_ORCH_Extension.git"
+  },
+  "homepage": "https://github.com/AryanBhargavprojects/pi_ORCH_Extension#readme",
+  "bugs": {
+    "url": "https://github.com/AryanBhargavprojects/pi_ORCH_Extension/issues"
+  },
+  "files": [
+    "*.ts",
+    "prompts/*.md",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "typebox": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
