@@ -7,6 +7,7 @@
  * Config (optional): set SEARXNG_URL env var or edit below.
  */
 
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -30,7 +31,7 @@ interface SearchResult {
 }
 
 function truncate(text: string, maxLen: number): string {
-	if (text && text.length > maxLen) return text.slice(0, maxLen) + "...";
+	if (text && text.length > maxLen) return `${text.slice(0, maxLen)}...`;
 	return text || "";
 }
 
@@ -139,10 +140,16 @@ const searxngSearchTool = defineTool({
 		),
 	}),
 
-	async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+	async execute(
+		_toolCallId,
+		params,
+		_signal,
+		_onUpdate,
+		_ctx,
+	): Promise<AgentToolResult<{ query: string } | undefined>> {
 		const typed = params as { query: string; num_results?: number; categories?: string; language?: string };
 		if (!typed?.query) {
-			return { content: [{ type: "text", text: "Error: query is required." }] };
+			return { content: [{ type: "text", text: "Error: query is required." }], details: undefined };
 		}
 		const result = await search(typed.query, typed);
 		return { content: [{ type: "text", text: result }], details: { query: typed.query } };
