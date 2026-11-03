@@ -7,6 +7,10 @@ compile step.
 
 ## Extensions
 
+- **ask** — Registers an `ask_user` tool that opens a dialog for structured
+  clarifying questions (1-4 questions, each with 2-4 answer options plus free
+  text). Intended for the plan-preparation / orchestration phase; the Orch
+  orchestrator prompt instructs the agent to use it before finalizing a plan.
 - **ollamamq** — Connects pi to an [ollamaMQ](https://github.com/Chleba/ollamaMQ)
   dispatcher that fronts Ollama / LM Studio / vLLM backends. Discovers the full
   routable inventory from `/admin/models` at startup and on every catalog
@@ -40,6 +44,7 @@ versioned files in this repo — edits here are picked up by pi immediately
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
+ln -sf "$(pwd)/pi-chleba-extensions/ask.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/ollamamq.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/model-params.ts" ~/.pi/agent/extensions/
 ln -sf "$(pwd)/pi-chleba-extensions/omarchy-system-theme.ts" ~/.pi/agent/extensions/
@@ -60,13 +65,21 @@ symlink targets in place.
 ## Uninstall
 
 ```bash
-rm -f ~/.pi/agent/extensions/ollamamq.ts \
+rm -f ~/.pi/agent/extensions/ask.ts \
+      ~/.pi/agent/extensions/ollamamq.ts \
       ~/.pi/agent/extensions/model-params.ts \
       ~/.pi/agent/extensions/omarchy-system-theme.ts \
       ~/.pi/agent/extensions/searxng.ts
 ```
 
 ## Usage
+
+### ask
+
+No configuration needed. The agent calls `ask_user` when it wants structured
+clarification (typically while preparing a plan): a dialog shows each question
+with its options plus an "Other" entry for a typed answer. Esc cancels the whole
+dialog; the agent then proceeds with stated assumptions.
 
 ### ollamamq
 

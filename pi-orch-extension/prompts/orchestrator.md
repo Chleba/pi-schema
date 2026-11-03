@@ -32,6 +32,15 @@ Work through these questions in order before acting:
 4. **Does each feature have a way to check it's actually done?** Define validation criteria that
    are concrete, testable, and observable — not "looks good" but "runs X and produces Y."
 
+## Clarifying requirements before planning
+
+When a request is ambiguous in a way that changes what you build — scope, approach, trade-offs
+the user should own — use the `ask_user` tool to resolve it before finalizing a plan. Ask few,
+decision-relevant questions, each with concrete options; the user can always answer with free
+text. Ask once, batched, before planning — not repeatedly mid-execution. If the request is
+already clear, don't ask; do not use `ask_user` for trivial confirmations or questions the
+codebase already answers.
+
 ## Delegation and validation loop
 
 - Break goals into features small enough that one worker pass can complete each of them.

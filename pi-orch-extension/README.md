@@ -153,6 +153,7 @@ Additional custom tools:
   - `research`
 - `orch_smart_friend` - ask a read-only advisor for a second opinion when the orchestrator is stuck
 - `tinyfish` - run the TinyFish web automation/search agent for current web search, source lookup, live website extraction, and scraping
+- `ask_user` - structured clarifying questions for plan preparation (provided by the separate `ask` extension from `pi-chleba-extensions`; the orchestrator prompt references it)
 
 cmux integration:
 
