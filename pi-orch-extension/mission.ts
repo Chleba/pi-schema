@@ -5,13 +5,23 @@ import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/p
 
 import { loadOrchConfig, type OrchLoadedConfig } from "./config.ts";
 import {
+	appendCmuxFeatureDelta,
 	appendCmuxRoleDelta,
+	cleanupCmuxBatchWorkerStreams,
 	cleanupCmuxMissionStreaming,
+	createCmuxFeatureStream,
+	setupCmuxBatchWorkerStreams,
 	setupCmuxMissionStreaming,
 	writeCmuxRoleMarker,
+	type OrchCmuxBatchWorkerSetup,
 } from "./cmux-streaming.ts";
 import { completeCmuxMission, syncCmuxMissionStatus } from "./cmux-integration.ts";
 import { GLYPHS, ORCH_COMMANDS, ORCH_WIDGET_IDS } from "./constants.ts";
+import {
+	buildWorkerFileScopeSection,
+	createDelegationBuffer,
+	dispatchParallelOrchTasks,
+} from "./interactive.ts";
 import {
 	type FeatureAttemptRecord,
 	type FeatureRunRecord,
@@ -63,7 +73,15 @@ import {
 	type OrchPendingTakeoverPrompt,
 	type OrchRuntimeState,
 } from "./runtime.ts";
-import { formatErrorMessage, isAbortLikeError, slugifyText } from "./utils.ts";
+import { findOverlappingPathPairs, formatErrorMessage, isAbortLikeError, slugifyText } from "./utils.ts";
+import {
+	commitFeatureWorktree,
+	createFeatureWorktree,
+	mergeFeatureBranch,
+	removeFeatureWorktree,
+	type FeatureWorktreeInfo,
+	type GitExec,
+} from "./worktrees.ts";
 
 const MAX_FEATURES = 6;
 const MAX_FEATURES_PER_MILESTONE = 2;
@@ -89,6 +107,82 @@ const FEATURE_STATUS_COLORS: Record<MissionFeatureStateStatus, MissionProgressCo
 	failed: "error",
 };
 
+
+/**
+ * Extracts repo-relative path declarations from a feature's deliverables. A token counts
+ * as a path when it contains "/" or looks like an extended file name; features without any
+ * usable path declaration are treated as overlapping every other feature and run solo.
+ */
+export function extractFeaturePaths(feature: MissionFeature): string[] {
+	const paths = new Set<string>();
+	for (const deliverable of feature.deliverables) {
+		for (const token of deliverable.split(/[\s'"`]+/)) {
+			const cleaned = token.replace(/^[(\[{<"'`]+/, "").replace(/[)\]}>,.;:'"!]+$/, "");
+			if (isPathLikeToken(cleaned)) {
+				paths.add(cleaned);
+			}
+		}
+	}
+	return [...paths];
+}
+
+function isPathLikeToken(token: string): boolean {
+	if (token.length === 0 || token.includes("*") || token.startsWith("-")) {
+		return false;
+	}
+	if (token.includes("/")) {
+		return true;
+	}
+	return /^[A-Za-z0-9_.-]+\.[A-Za-z][A-Za-z0-9]{1,9}$/.test(token);
+}
+
+/**
+ * Deterministically groups features into parallel batches in original order. A feature joins
+ * the current batch only when its declared path set is disjoint from every other member's
+ * (same "/"-boundary prefix check as orch_parallel_workers); a feature with no usable paths,
+ * or one that overlaps any member, closes the current batch and starts a new one. Batches
+ * never exceed maxBatchSize.
+ */
+export function partitionFeaturesIntoBatches(features: MissionFeature[], maxBatchSize: number): MissionFeature[][] {
+	const batches: MissionFeature[][] = [];
+	let current: MissionFeature[] = [];
+	for (const feature of features) {
+		if (current.length > 0 && (current.length >= maxBatchSize || overlapsAnyCurrentMember(feature, current))) {
+			batches.push(current);
+			current = [];
+		}
+		current.push(feature);
+	}
+	if (current.length > 0) {
+		batches.push(current);
+	}
+	return batches;
+}
+
+function overlapsAnyCurrentMember(feature: MissionFeature, current: MissionFeature[]): boolean {
+	const candidatePaths = extractFeaturePaths(feature);
+	for (const member of current) {
+		if (candidatePaths.length === 0 || extractFeaturePaths(member).length === 0) {
+			return true;
+		}
+		if (findOverlappingPathPairs([candidatePaths, extractFeaturePaths(member)]).length > 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+type BatchFirstAttempt =
+	| { kind: "completed"; workerResult: WorkerRun; status: OrchSubagentRunStatus }
+	| { kind: "error"; message: string }
+	| { kind: "aborted" };
+
+export type AutonomousMissionOptions = {
+	/** Test seam: replaces the deterministic single-feature plan generator. */
+	planGenerator?: (goal: string) => MissionPlan;
+	/** Injectable git execution for worktree isolation; defaults to child_process git when undefined. */
+	gitExec?: GitExec;
+};
 
 export function hasActiveMission(state: OrchRuntimeState): boolean {
 	return state.activeMission !== undefined;
@@ -331,12 +425,13 @@ function startMissionInBackground(
 	});
 }
 
-async function runAutonomousMission(
+export async function runAutonomousMission(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	goal: string,
 	configState: OrchLoadedConfig,
 	state: OrchRuntimeState,
+	options?: AutonomousMissionOptions,
 ): Promise<MissionRunResult> {
 	const startedAt = state.activeMission?.startedAt ?? new Date().toISOString();
 	const missionId = state.activeMission?.id ?? createMissionId(goal, startedAt);
@@ -359,7 +454,7 @@ async function runAutonomousMission(
 	setMissionStatus(ctx, state, "planning goal");
 
 	writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "orchestrator", "Goal planning");
-	const plan = generateMissionPlan(goal);
+	const plan = options?.planGenerator ? options.planGenerator(goal) : generateMissionPlan(goal);
 	const missionState = await initializeMissionState(
 		configState.resolvedPaths.missionsDir,
 		missionId,
@@ -450,6 +545,677 @@ async function runAutonomousMission(
 	const milestoneRuns: MilestoneRunRecord[] = [];
 	let missionStatus: MissionStatus = "completed";
 	const featureIndexById = new Map(plan.features.map((feature, index) => [feature.id, index]));
+	const maxBatchSize = configState.merged.maxParallelWorkers;
+
+	// One attempt of the per-feature loop, split into worker and validation steps so that
+	// parallel batches can run first-attempt workers concurrently while keeping validation
+	// sequential. Solo features run these in exactly the same order as the original loop.
+	const runWorkerAttempt = async (
+		feature: MissionFeature,
+		featureIndex: number,
+		milestoneIndex: number,
+		milestone: MissionMilestone,
+		attempt: number,
+		steering: SteeringResult | undefined,
+		activeFixTaskIds: string[],
+		fileScopeSection?: string,
+		forceFresh = false,
+		statusText?: string,
+		streamKey?: string,
+		cwdOverride?: string,
+	): Promise<{ workerResult: WorkerRun; status: OrchSubagentRunStatus; toolCalls: number }> => {
+		setMissionStatus(
+			ctx,
+			state,
+			statusText ?? `milestone ${milestoneIndex + 1}/${plan.milestones.length}: ${feature.title} (attempt ${attempt})`,
+		);
+		await syncMissionLiveState({
+			phase: `executing ${feature.title}`,
+			currentFeatureIndex: featureIndex,
+			currentFeatureId: feature.id,
+			currentAttempt: attempt,
+			currentMilestoneId: milestone.id,
+		});
+		await syncMissionFeatureState(feature.id, {
+			status: "in-progress",
+			attempts: attempt,
+		});
+		if (activeFixTaskIds.length > 0) {
+			await syncMissionFeatureStates(activeFixTaskIds, {
+				status: "in-progress",
+				attempts: attempt,
+			});
+		}
+
+		reportMissionEvent(
+			pi,
+			ctx,
+			`Feature ${featureIndex + 1}/${plan.features.length}`,
+			`${feature.title}\nAttempt ${attempt}: delegating to Orch worker`,
+			"info",
+			"execute",
+		);
+
+		const workerSharedState = await buildMissionPromptSharedState(missionState, "worker", milestone.id);
+		if (streamKey) {
+			await createCmuxFeatureStream(state.activeMission?.cmuxStreaming, streamKey, goal);
+		}
+		writeCmuxRoleMarker(
+			state.activeMission?.cmuxStreaming,
+			"worker",
+			`${feature.title} • attempt ${attempt}`,
+			streamKey,
+		);
+		const workerExecution = await runOrchWorkerSubagent({
+			label: `worker-${feature.id}-attempt-${attempt}`,
+			goal,
+			missionSummary: plan.summary,
+			feature,
+			validationContract: plan.validationContract,
+			sharedState: workerSharedState,
+			steering,
+			...(fileScopeSection ? { fileScopeSection } : {}),
+			...(forceFresh ? { forceFresh } : {}),
+			cwd: cwdOverride ?? ctx.cwd,
+			configState,
+			modelRegistry: ctx.modelRegistry,
+			signal: state.activeMission?.abortController.signal,
+			onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event, streamKey),
+		});
+		const workerResult = normalizeWorkerRun(
+			workerExecution.output,
+			workerExecution.provider,
+			workerExecution.modelId,
+			workerExecution.status,
+		);
+		await syncMissionFeatureState(feature.id, {
+			status: "in-progress",
+			attempts: attempt,
+			workerSummary: workerResult.summary,
+			validatorVerdict: null,
+		});
+		if (activeFixTaskIds.length > 0) {
+			await syncMissionFeatureStates(activeFixTaskIds, {
+				status: "in-progress",
+				attempts: attempt,
+				workerSummary: workerResult.summary,
+				validatorVerdict: null,
+			});
+		}
+		emitWorkerChanges(pi, ctx, workerResult.changes);
+
+		return {
+			workerResult,
+			status: workerExecution.status,
+			toolCalls: workerExecution.toolCalls,
+		};
+	};
+
+	const runValidationStep = async (
+		feature: MissionFeature,
+		featureIndex: number,
+		milestone: MissionMilestone,
+		attempt: number,
+		workerResult: WorkerRun,
+		workerStatus: OrchSubagentRunStatus,
+		cwdOverride?: string,
+	): Promise<ValidationResult> => {
+		// A worker that didn't complete cleanly must still be checked by a validator,
+		// even if the conditional-skip heuristic would otherwise have accepted it.
+		const shouldValidate =
+			workerStatus !== "completed" || shouldRunConditionalValidation(goal, feature, workerResult, attempt);
+		setMissionStatus(ctx, state, `${shouldValidate ? "validating" : "skipping validation for"} ${feature.title} (attempt ${attempt})`);
+		await syncMissionLiveState({
+			phase: `${shouldValidate ? "validating" : "skipping validation for"} ${feature.title}`,
+			currentFeatureIndex: featureIndex,
+			currentFeatureId: feature.id,
+			currentAttempt: attempt,
+			currentMilestoneId: milestone.id,
+		});
+		if (shouldValidate) {
+			const validatorSharedState = await buildMissionPromptSharedState(missionState, "validator", milestone.id);
+			writeCmuxRoleMarker(
+				state.activeMission?.cmuxStreaming,
+				"validator",
+				`${feature.title} • attempt ${attempt}`,
+			);
+			const validationExecution = await runOrchValidatorSubagent({
+				label: `validator-${feature.id}-attempt-${attempt}`,
+				goal,
+				missionSummary: plan.summary,
+				feature,
+				validationContract: plan.validationContract,
+				sharedState: validatorSharedState,
+				workerRun: workerResult,
+				cwd: cwdOverride ?? ctx.cwd,
+				configState,
+				modelRegistry: ctx.modelRegistry,
+				signal: state.activeMission?.abortController.signal,
+				onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event),
+			});
+			return normalizeValidationResult(
+				validationExecution.output,
+				validationExecution.provider,
+				validationExecution.modelId,
+				validationExecution.status,
+			);
+		}
+		return createSkippedValidationResult(feature, workerResult, attempt);
+	};
+
+	const completeAttempt = async (
+		feature: MissionFeature,
+		milestone: MissionMilestone,
+		attempt: number,
+		workerResult: WorkerRun,
+		validationResult: ValidationResult,
+		featureRun: FeatureRunRecord,
+		activeFixTaskIdsIn: string[],
+	): Promise<{ passed: boolean; steering?: SteeringResult; activeFixTaskIds: string[] }> => {
+		await appendMissionKnowledgeBase(
+			missionState,
+			`Feature: ${feature.title} • attempt ${attempt}`,
+			buildValidationKnowledgeBaseLines(workerResult, validationResult),
+		);
+
+		const attemptRecord: FeatureAttemptRecord = {
+			attempt,
+			worker: workerResult,
+			validation: validationResult,
+		};
+
+		if (validationResult.passed) {
+			featureRun.status = "passed";
+			featureRun.attempts.push(attemptRecord);
+			await syncMissionFeatureState(feature.id, {
+				status: "done",
+				attempts: attempt,
+				workerSummary: workerResult.summary,
+				validatorVerdict: "passed",
+			});
+			if (activeFixTaskIdsIn.length > 0) {
+				await syncMissionFeatureStates(activeFixTaskIdsIn, {
+					status: "done",
+					attempts: attempt,
+					workerSummary: workerResult.summary,
+					validatorVerdict: "passed",
+				});
+			}
+			reportMissionEvent(
+				pi,
+				ctx,
+				`Feature passed: ${feature.title}`,
+				validationResult.summary,
+				"success",
+				"validate",
+			);
+			return { passed: true, activeFixTaskIds: [] };
+		}
+
+		await syncMissionFeatureState(feature.id, {
+			status: attempt < MAX_ATTEMPTS_PER_FEATURE ? "in-progress" : "failed",
+			attempts: attempt,
+			workerSummary: workerResult.summary,
+			validatorVerdict: "failed",
+		});
+		if (activeFixTaskIdsIn.length > 0) {
+			await syncMissionFeatureStates(activeFixTaskIdsIn, {
+				status: "failed",
+				attempts: attempt,
+				workerSummary: workerResult.summary,
+				validatorVerdict: "failed",
+			});
+		}
+
+		let steering: SteeringResult | undefined;
+		let activeFixTaskIds = activeFixTaskIdsIn;
+		if (attempt < MAX_ATTEMPTS_PER_FEATURE) {
+			writeCmuxRoleMarker(
+				state.activeMission?.cmuxStreaming,
+				"orchestrator",
+				`Steering for ${feature.title} • attempt ${attempt}`,
+			);
+			steering = buildDeterministicSteeringResult(feature, validationResult);
+			attemptRecord.steering = steering;
+			activeFixTaskIds = await syncMissionFixTasks(
+				feature.id,
+				milestone.id,
+				attempt,
+				steering.fixTasks,
+			);
+			await appendMissionKnowledgeBase(
+				missionState,
+				`Orchestrator fix plan: ${feature.title} • attempt ${attempt}`,
+				buildSteeringKnowledgeBaseLines(steering),
+			);
+			await appendMissionGuidelines(
+				missionState,
+				`Guideline updates after ${feature.title} • attempt ${attempt}`,
+				steering.guidelineUpdates,
+			);
+			reportMissionEvent(
+				pi,
+				ctx,
+				`Validator requested fixes: ${feature.title}`,
+				[validationResult.summary, ...steering.instructions].join("\n"),
+				"warning",
+				"steer",
+			);
+		} else {
+			reportMissionEvent(
+				pi,
+				ctx,
+				`Feature failed: ${feature.title}`,
+				[validationResult.summary, ...validationResult.issues.map((issue) => `- ${issue.title}: ${issue.action}`)].join(
+					"\n",
+				),
+				"error",
+				"validate",
+			);
+		}
+
+		featureRun.attempts.push(attemptRecord);
+		return { passed: false, steering, activeFixTaskIds };
+	};
+
+	const runFullFeatureAttempt = async (
+		feature: MissionFeature,
+		featureIndex: number,
+		milestoneIndex: number,
+		milestone: MissionMilestone,
+		attempt: number,
+		steering: SteeringResult | undefined,
+		activeFixTaskIds: string[],
+		featureRun: FeatureRunRecord,
+		statusText?: string,
+		streamKey?: string,
+		cwdOverride?: string,
+	): Promise<{ passed: boolean; steering?: SteeringResult; activeFixTaskIds: string[] }> => {
+		let workerResult = buildErrorWorkerRun("Worker did not run for this attempt.");
+		let validationResult = buildErrorValidationResult("Attempt did not complete.");
+		let workerSucceeded = false;
+
+		try {
+			const execution = await runWorkerAttempt(
+				feature,
+				featureIndex,
+				milestoneIndex,
+				milestone,
+				attempt,
+				steering,
+				activeFixTaskIds,
+				undefined,
+				false,
+				statusText,
+				streamKey,
+				cwdOverride,
+			);
+			workerResult = execution.workerResult;
+			workerSucceeded = true;
+			validationResult = await runValidationStep(feature, featureIndex, milestone, attempt, workerResult, execution.status, cwdOverride);
+		} catch (error) {
+			if (isAbortLikeError(error)) {
+				throw error;
+			}
+			const message = formatErrorMessage(error);
+			if (!workerSucceeded) {
+				workerResult = buildErrorWorkerRun(message);
+			}
+			validationResult = buildErrorValidationResult(message);
+			reportMissionEvent(pi, ctx, `Feature attempt errored: ${feature.title}`, message, "error", "execute");
+		}
+
+		return completeAttempt(feature, milestone, attempt, workerResult, validationResult, featureRun, activeFixTaskIds);
+	};
+
+	const finishFeature = async (
+		feature: MissionFeature,
+		milestone: MissionMilestone,
+		featureRun: FeatureRunRecord,
+	): Promise<void> => {
+		featureRuns.push(featureRun);
+		emitMissionRecap(
+			pi,
+			ctx,
+			`feature ${feature.title} ${featureRun.status === "passed" ? "passed" : "failed"}${featureRun.status === "passed" ? ` after ${featureRun.attempts.length} attempt${featureRun.attempts.length === 1 ? "" : "s"}` : ""}`,
+		);
+		if (featureRun.status !== "passed") {
+			missionStatus = "failed";
+			await syncMissionMilestoneState(milestone.id, {
+				status: "failed",
+				validationSummary: `Feature failed: ${feature.title}`,
+				lastValidatedAt: new Date().toISOString(),
+			});
+		}
+	};
+
+	const runSoloFeature = async (
+		feature: MissionFeature,
+		milestoneIndex: number,
+		milestone: MissionMilestone,
+	): Promise<"completed" | "failed"> => {
+		const featureIndex = featureIndexById.get(feature.id) ?? 0;
+		const featureRun: FeatureRunRecord = {
+			feature,
+			status: "failed",
+			attempts: [],
+		};
+		let steering: SteeringResult | undefined;
+		let activeFixTaskIds: string[] = [];
+
+		for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_FEATURE; attempt++) {
+			const outcome = await runFullFeatureAttempt(
+				feature,
+				featureIndex,
+				milestoneIndex,
+				milestone,
+				attempt,
+				steering,
+				activeFixTaskIds,
+				featureRun,
+			);
+			steering = outcome.steering;
+			activeFixTaskIds = outcome.activeFixTaskIds;
+			if (outcome.passed) {
+				break;
+			}
+		}
+
+		await finishFeature(feature, milestone, featureRun);
+		return missionStatus === "failed" ? "failed" : "completed";
+	};
+
+	const runParallelFeatureBatch = async (
+		batch: MissionFeature[],
+		milestoneIndex: number,
+		milestone: MissionMilestone,
+		gitExec?: GitExec,
+	): Promise<"completed" | "failed"> => {
+		// First attempts of every batched feature run concurrently through the shared
+		// dispatcher (forceFresh sessions, mission abort signal); validation and any
+		// second attempts then run sequentially in original order.
+		const firstAttempts: BatchFirstAttempt[] = new Array<BatchFirstAttempt>(batch.length);
+		const batchStatusText = `milestone ${milestoneIndex + 1}/${plan.milestones.length}: ${batch.length} features in parallel`;
+
+		let batchStreams: OrchCmuxBatchWorkerSetup | undefined;
+		try {
+			batchStreams = await setupCmuxBatchWorkerStreams(
+				state.activeMission?.cmuxStreaming,
+				configState.merged.cmuxVisibility,
+				batch.map((feature) => feature.id),
+				goal,
+			);
+		} catch (error) {
+			reportMissionEvent(pi, ctx, "cmux batch streaming unavailable", formatErrorMessage(error), "warning", "mission");
+		}
+
+		const useWorktreeIsolation = configState.merged.workerIsolation === "worktree";
+		let worktrees: Map<string, FeatureWorktreeInfo> | undefined;
+		if (useWorktreeIsolation) {
+			worktrees = new Map();
+			for (const feature of batch) {
+				try {
+					const info = await createFeatureWorktree({ root: ctx.cwd, missionId, featureId: feature.id, exec: gitExec });
+					worktrees.set(feature.id, info);
+				} catch (error) {
+					reportMissionEvent(
+						pi,
+						ctx,
+						"worktree setup failed",
+						`${feature.title}: ${formatErrorMessage(error)}\nExisting worktrees for this batch are kept for inspection.`,
+						"error",
+						"execute",
+					);
+					throw error;
+				}
+			}
+		}
+
+		try {
+			await dispatchParallelOrchTasks(
+				batch.map((feature) => ({ role: "worker", task: feature.title, featureId: feature.id })),
+				{
+					allowedRoles: ["worker"],
+					maxConcurrency: maxBatchSize,
+					cwd: ctx.cwd,
+					configState,
+					modelRegistry: ctx.modelRegistry,
+					signal: state.activeMission?.abortController.signal,
+					executeTask: async (_task, index) => {
+						const feature = batch[index];
+						const featureIndex = featureIndexById.get(feature.id) ?? 0;
+						const buffer = createDelegationBuffer("worker", feature.id);
+						const startedAt = Date.now();
+						if (state.activeMission?.abortController.signal.aborted) {
+							buffer.status = "aborted";
+							buffer.finalSummary = "Aborted.";
+							firstAttempts[index] = { kind: "aborted" };
+							return { status: "aborted", featureId: feature.id, output: "Aborted.", elapsedMs: 0, toolCalls: 0, buffer };
+						}
+						try {
+							const paths = extractFeaturePaths(feature);
+							const execution = await runWorkerAttempt(
+								feature,
+								featureIndex,
+								milestoneIndex,
+								milestone,
+								1,
+								undefined,
+								[],
+								paths.length > 0 ? buildWorkerFileScopeSection(paths) : undefined,
+								true,
+								batchStatusText,
+								feature.id,
+								worktrees?.get(feature.id)?.worktreePath,
+							);
+							firstAttempts[index] = { kind: "completed", workerResult: execution.workerResult, status: execution.status };
+							return {
+								status: "success",
+								featureId: feature.id,
+								output: execution.workerResult.summary,
+								elapsedMs: Date.now() - startedAt,
+								toolCalls: execution.toolCalls,
+								buffer,
+							};
+						} catch (error) {
+							if (isAbortLikeError(error)) {
+								buffer.status = "aborted";
+								buffer.finalSummary = formatErrorMessage(error);
+								firstAttempts[index] = { kind: "aborted" };
+								return { status: "aborted", featureId: feature.id, output: String(error), elapsedMs: Date.now() - startedAt, toolCalls: 0, buffer };
+							}
+							const message = formatErrorMessage(error);
+							buffer.status = "failed";
+							buffer.finalSummary = message;
+							firstAttempts[index] = { kind: "error", message };
+							return { status: "failed", featureId: feature.id, output: String(error), elapsedMs: Date.now() - startedAt, toolCalls: 0, buffer };
+						}
+					},
+				},
+			);
+
+			if (state.activeMission?.abortController.signal.aborted) {
+				// No silent deletion: keep every created worktree/branch and report them for manual cleanup.
+				if (worktrees) {
+					const kept = [...worktrees.values()].map((info) => `${info.branchName} @ ${info.worktreePath}`).join("; ");
+					reportMissionEvent(
+						pi,
+						ctx,
+						"Worktrees kept after interruption",
+						`Unmerged worktrees remain for manual inspection: ${kept}`,
+						"warning",
+						"mission",
+					);
+				}
+				throw new Error("Aborted.");
+			}
+
+			for (let index = 0; index < batch.length; index++) {
+				if (state.activeMission?.abortController.signal.aborted) {
+					// No silent deletion: keep every created worktree/branch and report them for manual cleanup.
+					if (worktrees && worktrees.size > 0) {
+						const kept = [...worktrees.values()].map((info) => `${info.branchName} @ ${info.worktreePath}`).join("; ");
+						reportMissionEvent(
+							pi,
+							ctx,
+							"Worktrees kept after interruption",
+							`Unmerged worktrees remain for manual inspection: ${kept}`,
+							"warning",
+							"mission",
+						);
+					}
+					throw new Error("Aborted.");
+				}
+				const feature = batch[index];
+				const firstAttempt = firstAttempts[index];
+				if (!firstAttempt || firstAttempt.kind === "aborted") {
+					throw new Error(`Missing first-attempt result for feature ${feature.id}`);
+				}
+				const featureIndex = featureIndexById.get(feature.id) ?? 0;
+				const featureRun: FeatureRunRecord = {
+					feature,
+					status: "failed",
+					attempts: [],
+				};
+
+				let workerResult: WorkerRun;
+				let validationResult: ValidationResult;
+				if (firstAttempt.kind === "error") {
+					workerResult = buildErrorWorkerRun(firstAttempt.message);
+					validationResult = buildErrorValidationResult(firstAttempt.message);
+					reportMissionEvent(pi, ctx, `Feature attempt errored: ${feature.title}`, firstAttempt.message, "error", "execute");
+				} else {
+					workerResult = firstAttempt.workerResult;
+					// Under worktree isolation the validator inspects exactly what the worker produced in that feature's worktree.
+					validationResult = await runValidationStep(
+						feature,
+						featureIndex,
+						milestone,
+						1,
+						workerResult,
+						firstAttempt.status,
+						worktrees?.get(feature.id)?.worktreePath,
+					);
+				}
+
+				let outcome = await completeAttempt(feature, milestone, 1, workerResult, validationResult, featureRun, []);
+				if (!outcome.passed) {
+					// Retries run sequentially while the batch panes are still open; stream each
+					// retry into its own per-feature log so it stays visible in that pane.
+					outcome = await runFullFeatureAttempt(
+						feature,
+						featureIndex,
+						milestoneIndex,
+						milestone,
+						2,
+						outcome.steering,
+						outcome.activeFixTaskIds,
+						featureRun,
+						batchStatusText,
+						feature.id,
+						worktrees?.get(feature.id)?.worktreePath,
+					);
+				}
+
+				await finishFeature(feature, milestone, featureRun);
+				// Under worktree isolation the batch settles fully so validated branches can still be merged;
+				// shared-cwd keeps today's early-exit behavior exactly.
+				if (!useWorktreeIsolation && missionStatus === "failed") {
+					return "failed";
+				}
+			}
+
+			// Worktree isolation: commit and merge validated branches into the main tree sequentially in
+			// original order. A conflict is never auto-resolved; it stops merging and keeps everything for steering.
+			if (worktrees) {
+				for (let index = 0; index < batch.length; index++) {
+					if (state.activeMission?.abortController.signal.aborted) {
+						// No silent deletion: keep every created worktree/branch and report them for manual cleanup.
+						const kept = [...worktrees.values()].map((info) => `${info.branchName} @ ${info.worktreePath}`).join("; ");
+						reportMissionEvent(
+							pi,
+							ctx,
+							"Worktrees kept after interruption",
+							`Unmerged worktrees remain for manual inspection: ${kept}`,
+							"warning",
+							"mission",
+						);
+						throw new Error("Aborted.");
+					}
+					const feature = batch[index];
+					const info = worktrees.get(feature.id);
+					if (!info) continue;
+					const featureRun = featureRuns.find((run) => run.feature.id === feature.id);
+					if (!featureRun || featureRun.status !== "passed") {
+						// Failed validation: keep the worktree and branch for steering.
+						continue;
+					}
+
+					let mergeFailure: string | undefined;
+					try {
+						await commitFeatureWorktree({
+							root: ctx.cwd,
+							worktreePath: info.worktreePath,
+							message: `Orch ${missionId} ${feature.id}: worker output`,
+							exec: gitExec,
+						});
+						const mergeResult = await mergeFeatureBranch({ root: ctx.cwd, branchName: info.branchName, exec: gitExec });
+						if (!mergeResult.merged) {
+							mergeFailure =
+								mergeResult.conflictPaths && mergeResult.conflictPaths.length > 0
+									? `conflicting paths: ${mergeResult.conflictPaths.join(", ")}`
+									: "git merge failed";
+						}
+					} catch (error) {
+						mergeFailure = formatErrorMessage(error);
+					}
+
+					if (mergeFailure === undefined) {
+						await removeFeatureWorktree({ root: ctx.cwd, worktreePath: info.worktreePath, exec: gitExec });
+						reportMissionEvent(
+							pi,
+							ctx,
+							`Merged ${feature.title}`,
+							`Branch ${info.branchName} merged into the main tree; worktree removed.`,
+							"success",
+							"execute",
+						);
+						continue;
+					}
+
+					featureRun.status = "failed";
+					missionStatus = "failed";
+					await syncMissionFeatureState(feature.id, {
+						status: "failed",
+						attempts: featureRun.attempts.length,
+						workerSummary: featureRun.attempts[featureRun.attempts.length - 1]?.worker.summary ?? null,
+						validatorVerdict: "failed",
+					});
+					await syncMissionMilestoneState(milestone.id, {
+						status: "failed",
+						validationSummary: `Merge failed for ${feature.title}`,
+						lastValidatedAt: new Date().toISOString(),
+					});
+					reportMissionEvent(
+						pi,
+						ctx,
+						`Worktree merge failed: ${feature.title}`,
+						[
+							`Branch ${info.branchName} could not be merged into the main tree (${mergeFailure}).`,
+							`No automatic resolution was attempted. The worktree is kept at ${info.worktreePath} for manual steering; remaining batch merges were skipped.`,
+						].join("\n"),
+						"error",
+						"execute",
+					);
+					break;
+				}
+			}
+
+			return missionStatus === "failed" ? "failed" : "completed";
+		} finally {
+			await cleanupCmuxBatchWorkerStreams(batchStreams, state.activeMission?.cmuxStreaming);
+		}
+	};
 
 	for (let milestoneIndex = 0; milestoneIndex < plan.milestones.length; milestoneIndex++) {
 		const milestone = plan.milestones[milestoneIndex];
@@ -471,268 +1237,16 @@ async function runAutonomousMission(
 			"plan",
 		);
 
-		for (const feature of milestoneFeatures) {
-			const featureIndex = featureIndexById.get(feature.id) ?? 0;
-			const featureRun: FeatureRunRecord = {
-				feature,
-				status: "failed",
-				attempts: [],
-			};
-			let steering: SteeringResult | undefined;
-			let activeFixTaskIds: string[] = [];
-			let passed = false;
-
-			for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_FEATURE; attempt++) {
-				setMissionStatus(
-					ctx,
-					state,
-					`milestone ${milestoneIndex + 1}/${plan.milestones.length}: ${feature.title} (attempt ${attempt})`,
-				);
-				await syncMissionLiveState({
-					phase: `executing ${feature.title}`,
-					currentFeatureIndex: featureIndex,
-					currentFeatureId: feature.id,
-					currentAttempt: attempt,
-					currentMilestoneId: milestone.id,
-				});
-				await syncMissionFeatureState(feature.id, {
-					status: "in-progress",
-					attempts: attempt,
-				});
-				if (activeFixTaskIds.length > 0) {
-					await syncMissionFeatureStates(activeFixTaskIds, {
-						status: "in-progress",
-						attempts: attempt,
-					});
-				}
-
-				reportMissionEvent(
-					pi,
-					ctx,
-					`Feature ${featureIndex + 1}/${plan.features.length}`,
-					`${feature.title}\nAttempt ${attempt}: delegating to Orch worker`,
-					"info",
-					"execute",
-				);
-
-				let workerResult: WorkerRun = buildErrorWorkerRun("Worker did not run for this attempt.");
-				let validationResult: ValidationResult = buildErrorValidationResult("Attempt did not complete.");
-				let workerSucceeded = false;
-
-				try {
-					const workerSharedState = await buildMissionPromptSharedState(missionState, "worker", milestone.id);
-					writeCmuxRoleMarker(
-						state.activeMission?.cmuxStreaming,
-						"worker",
-						`${feature.title} • attempt ${attempt}`,
-					);
-					const workerExecution = await runOrchWorkerSubagent({
-						label: `worker-${feature.id}-attempt-${attempt}`,
-						goal,
-						missionSummary: plan.summary,
-						feature,
-						validationContract: plan.validationContract,
-						sharedState: workerSharedState,
-						steering,
-						cwd: ctx.cwd,
-						configState,
-						modelRegistry: ctx.modelRegistry,
-						signal: state.activeMission?.abortController.signal,
-						onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event),
-					});
-					workerResult = normalizeWorkerRun(
-						workerExecution.output,
-						workerExecution.provider,
-						workerExecution.modelId,
-						workerExecution.status,
-					);
-					workerSucceeded = true;
-					await syncMissionFeatureState(feature.id, {
-						status: "in-progress",
-						attempts: attempt,
-						workerSummary: workerResult.summary,
-						validatorVerdict: null,
-					});
-					if (activeFixTaskIds.length > 0) {
-						await syncMissionFeatureStates(activeFixTaskIds, {
-							status: "in-progress",
-							attempts: attempt,
-							workerSummary: workerResult.summary,
-							validatorVerdict: null,
-						});
-					}
-					emitWorkerChanges(pi, ctx, workerResult.changes);
-
-					// A worker that didn't complete cleanly must still be checked by a validator,
-					// even if the conditional-skip heuristic would otherwise have accepted it.
-					const shouldValidate =
-						workerExecution.status !== "completed" || shouldRunConditionalValidation(goal, feature, workerResult, attempt);
-					setMissionStatus(ctx, state, `${shouldValidate ? "validating" : "skipping validation for"} ${feature.title} (attempt ${attempt})`);
-					await syncMissionLiveState({
-						phase: `${shouldValidate ? "validating" : "skipping validation for"} ${feature.title}`,
-						currentFeatureIndex: featureIndex,
-						currentFeatureId: feature.id,
-						currentAttempt: attempt,
-						currentMilestoneId: milestone.id,
-					});
-					if (shouldValidate) {
-						const validatorSharedState = await buildMissionPromptSharedState(missionState, "validator", milestone.id);
-						writeCmuxRoleMarker(
-							state.activeMission?.cmuxStreaming,
-							"validator",
-							`${feature.title} • attempt ${attempt}`,
-						);
-						const validationExecution = await runOrchValidatorSubagent({
-							label: `validator-${feature.id}-attempt-${attempt}`,
-							goal,
-							missionSummary: plan.summary,
-							feature,
-							validationContract: plan.validationContract,
-							sharedState: validatorSharedState,
-							workerRun: workerResult,
-							cwd: ctx.cwd,
-							configState,
-							modelRegistry: ctx.modelRegistry,
-							signal: state.activeMission?.abortController.signal,
-							onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event),
-						});
-						validationResult = normalizeValidationResult(
-							validationExecution.output,
-							validationExecution.provider,
-							validationExecution.modelId,
-							validationExecution.status,
-						);
-					} else {
-						validationResult = createSkippedValidationResult(feature, workerResult, attempt);
-					}
-				} catch (error) {
-					if (isAbortLikeError(error)) {
-						throw error;
-					}
-					const message = formatErrorMessage(error);
-					if (!workerSucceeded) {
-						workerResult = buildErrorWorkerRun(message);
-					}
-					validationResult = buildErrorValidationResult(message);
-					reportMissionEvent(pi, ctx, `Feature attempt errored: ${feature.title}`, message, "error", "execute");
-				}
-				await appendMissionKnowledgeBase(
-					missionState,
-					`Feature: ${feature.title} • attempt ${attempt}`,
-					buildValidationKnowledgeBaseLines(workerResult, validationResult),
-				);
-
-				const attemptRecord: FeatureAttemptRecord = {
-					attempt,
-					worker: workerResult,
-					validation: validationResult,
-				};
-
-				if (validationResult.passed) {
-					featureRun.status = "passed";
-					featureRun.attempts.push(attemptRecord);
-					passed = true;
-					await syncMissionFeatureState(feature.id, {
-						status: "done",
-						attempts: attempt,
-						workerSummary: workerResult.summary,
-						validatorVerdict: "passed",
-					});
-					if (activeFixTaskIds.length > 0) {
-						await syncMissionFeatureStates(activeFixTaskIds, {
-							status: "done",
-							attempts: attempt,
-							workerSummary: workerResult.summary,
-							validatorVerdict: "passed",
-						});
-					}
-					reportMissionEvent(
-						pi,
-						ctx,
-						`Feature passed: ${feature.title}`,
-						validationResult.summary,
-						"success",
-						"validate",
-					);
-					break;
-				}
-
-				await syncMissionFeatureState(feature.id, {
-					status: attempt < MAX_ATTEMPTS_PER_FEATURE ? "in-progress" : "failed",
-					attempts: attempt,
-					workerSummary: workerResult.summary,
-					validatorVerdict: "failed",
-				});
-				if (activeFixTaskIds.length > 0) {
-					await syncMissionFeatureStates(activeFixTaskIds, {
-						status: "failed",
-						attempts: attempt,
-						workerSummary: workerResult.summary,
-						validatorVerdict: "failed",
-					});
-				}
-
-				if (attempt < MAX_ATTEMPTS_PER_FEATURE) {
-					writeCmuxRoleMarker(
-						state.activeMission?.cmuxStreaming,
-						"orchestrator",
-						`Steering for ${feature.title} • attempt ${attempt}`,
-					);
-					steering = buildDeterministicSteeringResult(feature, validationResult);
-					attemptRecord.steering = steering;
-					activeFixTaskIds = await syncMissionFixTasks(
-						feature.id,
-						milestone.id,
-						attempt,
-						steering.fixTasks,
-					);
-					await appendMissionKnowledgeBase(
-						missionState,
-						`Orchestrator fix plan: ${feature.title} • attempt ${attempt}`,
-						buildSteeringKnowledgeBaseLines(steering),
-					);
-					await appendMissionGuidelines(
-						missionState,
-						`Guideline updates after ${feature.title} • attempt ${attempt}`,
-						steering.guidelineUpdates,
-					);
-					reportMissionEvent(
-						pi,
-						ctx,
-						`Validator requested fixes: ${feature.title}`,
-						[validationResult.summary, ...steering.instructions].join("\n"),
-						"warning",
-						"steer",
-					);
-				} else {
-					reportMissionEvent(
-						pi,
-						ctx,
-						`Feature failed: ${feature.title}`,
-						[validationResult.summary, ...validationResult.issues.map((issue) => `- ${issue.title}: ${issue.action}`)].join(
-							"\n",
-						),
-						"error",
-						"validate",
-					);
-				}
-
-				featureRun.attempts.push(attemptRecord);
+		const featureBatches = partitionFeaturesIntoBatches(milestoneFeatures, maxBatchSize);
+		for (const batch of featureBatches) {
+			let result: "completed" | "failed";
+			if (batch.length === 1) {
+				result = await runSoloFeature(batch[0], milestoneIndex, milestone);
+			} else {
+				result = await runParallelFeatureBatch(batch, milestoneIndex, milestone, options?.gitExec);
 			}
-
-			featureRuns.push(featureRun);
-			emitMissionRecap(
-				pi,
-				ctx,
-				`feature ${feature.title} ${passed ? "passed" : "failed"}${passed ? ` after ${featureRun.attempts.length} attempt${featureRun.attempts.length === 1 ? "" : "s"}` : ""}`,
-			);
-			if (!passed) {
+			if (result === "failed") {
 				missionStatus = "failed";
-				await syncMissionMilestoneState(milestone.id, {
-					status: "failed",
-					validationSummary: `Feature failed: ${feature.title}`,
-					lastValidatedAt: new Date().toISOString(),
-				});
 				break;
 			}
 		}
@@ -1392,6 +1906,7 @@ function handleSubagentStreamEvent(
 	ctx: ExtensionCommandContext,
 	state: OrchRuntimeState,
 	event: OrchSubagentStreamEvent,
+	streamKey?: string,
 ): void {
 	const mission = state.activeMission;
 	if (!mission) {
@@ -1409,11 +1924,20 @@ function handleSubagentStreamEvent(
 
 	if (event.type === "tool_call" || event.type === "tool_diff") {
 		const diffBlock = event.diff && event.diff.length > 0 ? `\n${event.diff}\n` : "";
-		appendCmuxRoleDelta(mission.cmuxStreaming, event.role, `\n[${event.label}] ${event.detail}${diffBlock}\n`);
+		const delta = `\n[${event.label}] ${event.detail}${diffBlock}\n`;
+		if (streamKey) {
+			appendCmuxFeatureDelta(mission.cmuxStreaming, streamKey, delta);
+		} else {
+			appendCmuxRoleDelta(mission.cmuxStreaming, event.role, delta);
+		}
 		return;
 	}
 
-	appendCmuxRoleDelta(mission.cmuxStreaming, event.role, event.delta);
+	if (streamKey) {
+		appendCmuxFeatureDelta(mission.cmuxStreaming, streamKey, event.delta);
+	} else {
+		appendCmuxRoleDelta(mission.cmuxStreaming, event.role, event.delta);
+	}
 
 	if (event.role === "orchestrator") {
 		if (event.type === "thinking_delta") {

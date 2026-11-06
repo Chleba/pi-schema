@@ -38,12 +38,20 @@ export type OrchCmuxRoleStream = {
 	stream: WriteStream;
 };
 
+/** Per-feature worker stream for parallel batches; keeps concurrent streams out of the shared role log. */
+export type OrchCmuxFeatureStream = {
+	streamKey: string;
+	logFilePath: string;
+	stream: WriteStream;
+};
+
 export type OrchCmuxMissionStreaming = {
 	enabled: boolean;
 	workspaceRef: string;
 	anchorSurfaceRef: string;
 	streamDir: string;
 	roleStreams: Partial<Record<OrchRoleName, OrchCmuxRoleStream>>;
+	featureStreams?: Map<string, OrchCmuxFeatureStream>;
 };
 
 export type OrchActiveMission = {

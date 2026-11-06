@@ -4,8 +4,10 @@ import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import type { OrchRoleName } from "./config.ts";
-import type { OrchCmuxMissionStreaming, OrchCmuxRoleStream } from "./runtime.ts";
+import type { OrchCmuxVisibility, OrchRoleName } from "./config.ts";
+import { getGridPlacement } from "./cmux-pi-runner.ts";
+import { shouldCreatePane } from "./cmux-visibility.ts";
+import type { OrchCmuxFeatureStream, OrchCmuxMissionStreaming, OrchCmuxRoleStream } from "./runtime.ts";
 
 const execFileAsync = promisify(execFile);
 const CMUX_ROLE_ORDER: OrchRoleName[] = ["worker", "validator"];
@@ -50,6 +52,7 @@ export async function setupCmuxMissionStreaming(
 	await mkdir(streamDir, { recursive: true });
 
 	const roleStreams: Partial<Record<OrchRoleName, OrchCmuxRoleStream>> = {};
+	const featureStreams = new Map<string, OrchCmuxFeatureStream>();
 	const createdSurfaceRefs: string[] = [];
 
 	try {
@@ -61,7 +64,12 @@ export async function setupCmuxMissionStreaming(
 		roleStreams.worker = await createRoleStream(streamDir, missionId, goal, "worker", worker);
 		roleStreams.validator = await createRoleStream(streamDir, missionId, goal, "validator", validator);
 
-		await Promise.all(CMUX_ROLE_ORDER.map((role) => attachTail(roleStreams[role]!, workspaceRef)));
+		await Promise.all(
+			CMUX_ROLE_ORDER.map((role) => {
+				const roleStream = roleStreams[role]!;
+				return attachTail(workspaceRef, roleStream.surfaceRef, roleStream.logFilePath);
+			}),
+		);
 		await focusSurface(workspaceRef, anchorSurfaceRef);
 
 		return {
@@ -69,6 +77,7 @@ export async function setupCmuxMissionStreaming(
 			workspaceRef,
 			anchorSurfaceRef,
 			roleStreams,
+			featureStreams,
 			streamDir,
 		};
 	} catch (error) {
@@ -86,8 +95,14 @@ export function writeCmuxRoleMarker(
 	streaming: OrchCmuxMissionStreaming | undefined,
 	role: OrchRoleName,
 	label: string,
+	streamKey?: string,
 ): void {
 	if (!streaming?.enabled) {
+		return;
+	}
+	const featureStream = streamKey ? streaming.featureStreams?.get(streamKey) : undefined;
+	if (featureStream) {
+		featureStream.stream.write(`\n\n===== ${label} =====\n\n`);
 		return;
 	}
 	const roleStream = streaming.roleStreams[role];
@@ -112,6 +127,19 @@ export function appendCmuxRoleDelta(
 	roleStream.stream.write(delta);
 }
 
+/** Append a stream chunk to the per-feature log of a batched worker (no-op when unknown). */
+export function appendCmuxFeatureDelta(
+	streaming: OrchCmuxMissionStreaming | undefined,
+	streamKey: string,
+	delta: string,
+): void {
+	if (!streaming?.enabled || delta.length === 0) {
+		return;
+	}
+	const featureStream = streaming.featureStreams?.get(streamKey);
+	featureStream?.stream.write(delta);
+}
+
 export async function cleanupCmuxMissionStreaming(
 	streaming: OrchCmuxMissionStreaming | undefined,
 	footer: string,
@@ -133,6 +161,16 @@ export async function cleanupCmuxMissionStreaming(
 			(roleStream) =>
 				new Promise<void>((resolve) => {
 					roleStream.stream.end(resolve);
+				}),
+		),
+	);
+
+	const featureStreams = [...(streaming.featureStreams?.values() ?? [])];
+	await Promise.all(
+		featureStreams.map(
+			(featureStream) =>
+				new Promise<void>((resolve) => {
+					featureStream.stream.end(resolve);
 				}),
 		),
 	);
@@ -201,12 +239,12 @@ async function createRoleStream(
 	};
 }
 
-async function attachTail(roleStream: OrchCmuxRoleStream, workspaceRef: string): Promise<void> {
-	await sendToSurface(workspaceRef, roleStream.surfaceRef, "clear\\n");
+async function attachTail(workspaceRef: string, surfaceRef: string, logFilePath: string): Promise<void> {
+	await sendToSurface(workspaceRef, surfaceRef, "clear\\n");
 	await sendToSurface(
 		workspaceRef,
-		roleStream.surfaceRef,
-		`tail -n +1 -f -- ${quoteForShell(roleStream.logFilePath)}\\n`,
+		surfaceRef,
+		`tail -n +1 -f -- ${quoteForShell(logFilePath)}\\n`,
 	);
 }
 
@@ -222,6 +260,10 @@ async function sendToSurface(workspaceRef: string, surfaceRef: string, text: str
 	await runCmux(["send", "--workspace", workspaceRef, "--surface", surfaceRef, text]);
 }
 
+async function sendKeyToSurface(workspaceRef: string, surfaceRef: string, key: string): Promise<void> {
+	await runCmux(["send-key", "--workspace", workspaceRef, "--surface", surfaceRef, key]);
+}
+
 async function runCmuxJson<T>(args: string[]): Promise<T> {
 	const stdout = await runCmux(["--json", ...args]);
 	return JSON.parse(stdout) as T;
@@ -233,6 +275,163 @@ async function runCmux(args: string[]): Promise<string> {
 		maxBuffer: 1024 * 1024,
 	});
 	return stdout;
+}
+
+/**
+ * Create (or reuse) the per-feature log stream for a batched worker. The log lives
+ * alongside the goal role logs so concurrent batch streams never interleave.
+ */
+export async function createCmuxFeatureStream(
+	streaming: OrchCmuxMissionStreaming | undefined,
+	streamKey: string,
+	goal: string,
+): Promise<OrchCmuxFeatureStream | undefined> {
+	if (!streaming?.enabled) {
+		return undefined;
+	}
+	const existing = streaming.featureStreams?.get(streamKey);
+	if (existing) {
+		return existing;
+	}
+
+	const logFilePath = join(streaming.streamDir, `${sanitizeForFileName(streamKey)}.log`);
+	const header = [
+		`Orch worker stream for ${streamKey}`,
+		`Goal: ${goal}`,
+		"",
+	].join("\n");
+	await writeFile(logFilePath, header, "utf8");
+	const featureStream: OrchCmuxFeatureStream = {
+		streamKey,
+		logFilePath,
+		stream: createWriteStream(logFilePath, { flags: "a" }),
+	};
+	if (!streaming.featureStreams) {
+		streaming.featureStreams = new Map();
+	}
+	streaming.featureStreams.set(streamKey, featureStream);
+	return featureStream;
+}
+
+export type OrchCmuxBatchWorkerSetup = {
+	featureStreams: Map<string, OrchCmuxFeatureStream>;
+	createdSurfaceRefs: string[];
+	repointedSlotZero: boolean;
+};
+
+/**
+ * Set up cmux visibility for a parallel worker batch. Every member gets its own
+ * per-feature log (mirroring role logs); when panes are allowed, the base worker pane
+ * acts as grid slot 0 and one additional split is created per remaining member in
+ * getGridPlacement order, each tailing that feature's log.
+ */
+export async function setupCmuxBatchWorkerStreams(
+	streaming: OrchCmuxMissionStreaming | undefined,
+	visibility: OrchCmuxVisibility,
+	featureIds: string[],
+	goal: string,
+): Promise<OrchCmuxBatchWorkerSetup | undefined> {
+	if (!streaming?.enabled || featureIds.length < 2) {
+		return undefined;
+	}
+
+	const featureStreams = new Map<string, OrchCmuxFeatureStream>();
+	for (const streamKey of featureIds) {
+		try {
+			const featureStream = await createCmuxFeatureStream(streaming, streamKey, goal);
+			if (featureStream) {
+				featureStreams.set(streamKey, featureStream);
+			}
+		} catch {
+			// Best-effort: skip a feature whose log cannot be created.
+		}
+	}
+	if (featureStreams.size === 0) {
+		return undefined;
+	}
+
+	const setup: OrchCmuxBatchWorkerSetup = {
+		featureStreams,
+		createdSurfaceRefs: [],
+		repointedSlotZero: false,
+	};
+	if (!shouldCreatePane(visibility)) {
+		return setup;
+	}
+
+	const workerStream = streaming.roleStreams.worker;
+	if (!workerStream) {
+		return setup;
+	}
+
+	const slots = new Map<number, { surfaceRef: string; paneRef?: string }>();
+	slots.set(0, { surfaceRef: workerStream.surfaceRef, paneRef: workerStream.paneRef });
+
+	try {
+		const firstFeatureStream = featureStreams.get(featureIds[0]);
+		if (firstFeatureStream) {
+			await sendKeyToSurface(streaming.workspaceRef, workerStream.surfaceRef, "ctrl-c");
+			await attachTail(streaming.workspaceRef, workerStream.surfaceRef, firstFeatureStream.logFilePath);
+			setup.repointedSlotZero = true;
+		}
+	} catch {
+		// Best-effort: keep the base pane on its previous tail if re-pointing fails.
+	}
+
+	for (let index = 1; index < featureIds.length; index++) {
+		try {
+			const placement = getGridPlacement(index);
+			const anchor = placement.anchorIndex !== undefined ? slots.get(placement.anchorIndex) : undefined;
+			if (!anchor) {
+				continue;
+			}
+			const split = await createSplit(placement.direction, streaming.workspaceRef, anchor.paneRef ?? anchor.surfaceRef);
+			slots.set(index, { surfaceRef: split.surfaceRef, paneRef: split.paneRef });
+			setup.createdSurfaceRefs.push(split.surfaceRef);
+			const featureStream = featureStreams.get(featureIds[index]);
+			if (featureStream) {
+				await attachTail(streaming.workspaceRef, split.surfaceRef, featureStream.logFilePath);
+			}
+		} catch {
+			// Best-effort: skip a pane that cannot be created and continue with the rest.
+		}
+	}
+
+	return setup;
+}
+
+/** Close every batch-created pane, end the per-feature logs, and restore the base worker pane tail. */
+export async function cleanupCmuxBatchWorkerStreams(
+	setup: OrchCmuxBatchWorkerSetup | undefined,
+	streaming: OrchCmuxMissionStreaming | undefined,
+): Promise<void> {
+	if (!setup || !streaming?.enabled) {
+		return;
+	}
+
+	await Promise.allSettled(setup.createdSurfaceRefs.map((surfaceRef) => closeSurface(streaming.workspaceRef, surfaceRef)));
+
+	const featureStreams = [...setup.featureStreams.values()];
+	await Promise.all(
+		featureStreams.map(
+			(featureStream) =>
+				new Promise<void>((resolve) => {
+					featureStream.stream.end(resolve);
+				}),
+		),
+	);
+
+	if (setup.repointedSlotZero) {
+		const workerStream = streaming.roleStreams.worker;
+		if (workerStream) {
+			await sendKeyToSurface(streaming.workspaceRef, workerStream.surfaceRef, "ctrl-c").catch(() => {});
+			await attachTail(streaming.workspaceRef, workerStream.surfaceRef, workerStream.logFilePath).catch(() => {});
+		}
+	}
+}
+
+function sanitizeForFileName(value: string): string {
+	return value.replace(/[^a-z0-9_-]/gi, "_");
 }
 
 function quoteForShell(value: string): string {

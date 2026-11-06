@@ -154,6 +154,13 @@ export function renderParallelResult(
 	return new ParallelResultComponent(buffers, options.expanded === true, theme);
 }
 
+export function renderParallelWorkersCall(
+	args: unknown,
+	theme: OrchTheme,
+): Component {
+	return new ParallelWorkersCallComponent(args, theme);
+}
+
 function registerReadRenderer(pi: ExtensionAPI): void {
 	const original = getBuiltInTools(process.cwd()).read;
 	pi.registerTool({
@@ -559,6 +566,29 @@ class ParallelCallComponent implements Component {
 			this.theme.fg("toolTitle", this.theme.bold("Parallel ")),
 			this.theme.fg("accent", `${count} ${count === 1 ? "task" : "tasks"}`),
 			roleSummary ? this.theme.fg("dim", `  (${roleSummary})`) : "",
+		].join("");
+		return [truncateToWidth(header, width, this.theme.fg("dim", GLYPHS.ellipsis))];
+	}
+
+	invalidate(): void {
+		// Stateless.
+	}
+}
+
+class ParallelWorkersCallComponent implements Component {
+	constructor(
+		private readonly args: unknown,
+		private readonly theme: OrchTheme,
+	) {}
+
+	render(width: number): string[] {
+		const input = asPlainRecord(this.args);
+		const tasks = Array.isArray(input?.tasks) ? (input.tasks as Array<{ paths?: string[] }>) : [];
+		const count = tasks.length;
+		const pathCount = tasks.reduce((sum, task) => sum + (Array.isArray(task.paths) ? task.paths.length : 0), 0);
+		const header = [
+			this.theme.fg("toolTitle", this.theme.bold("Parallel Workers ")),
+			this.theme.fg("accent", `${count} ${count === 1 ? "task" : "tasks"} • ${pathCount} scoped paths`),
 		].join("");
 		return [truncateToWidth(header, width, this.theme.fg("dim", GLYPHS.ellipsis))];
 	}

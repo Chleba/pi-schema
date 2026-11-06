@@ -28,6 +28,8 @@ export type OrchTokenThresholds = {
 
 export type OrchCmuxVisibility = "off" | "status" | "panes" | "auto";
 
+export type OrchWorkerIsolation = "shared-cwd" | "worktree";
+
 export type OrchSubagentRoleTimeouts = {
 	/** Stall/silence window for normal sub-agent prompt calls (ms). Resets on every stream event; fires only when the sub-agent goes quiet. */
 	promptMs: number;
@@ -58,6 +60,8 @@ export type OrchConfig = {
 	tokenThresholds: OrchTokenThresholds;
 	paths: OrchPathConfig;
 	cmuxVisibility: OrchCmuxVisibility;
+	maxParallelWorkers: number;
+	workerIsolation: OrchWorkerIsolation;
 	subagentTimeouts: OrchSubagentTimeouts;
 };
 
@@ -66,6 +70,8 @@ export type OrchConfigOverrides = {
 	tokenThresholds?: Partial<OrchTokenThresholds>;
 	paths?: Partial<OrchPathConfig>;
 	cmuxVisibility?: OrchCmuxVisibility;
+	maxParallelWorkers?: number;
+	workerIsolation?: OrchWorkerIsolation;
 	subagentTimeouts?: Partial<OrchSubagentTimeouts>;
 };
 
@@ -119,6 +125,8 @@ export const ORCH_CONFIG_KEYS = [
 	"paths.adaptationLogFile",
 	"paths.plansDir",
 	"cmuxVisibility",
+	"maxParallelWorkers",
+	"workerIsolation",
 	"subagentTimeouts.promptMs",
 	"subagentTimeouts.recoveryPromptMs",
 	"subagentTimeouts.hardCeilingMs",
@@ -230,6 +238,14 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 	},
 	"cmuxVisibility": {
 		description: "CMUX visibility mode for sub-agent panes: off, status, panes, or auto",
+		valueType: "string",
+	},
+	"maxParallelWorkers": {
+		description: "Maximum number of Orch workers that may run in parallel (1-8)",
+		valueType: "number",
+	},
+	"workerIsolation": {
+		description: "File isolation mode for parallel workers: shared-cwd or worktree",
 		valueType: "string",
 	},
 	"subagentTimeouts.promptMs": {
@@ -358,6 +374,8 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 		plansDir: ".pi/orch/plans",
 	},
 	cmuxVisibility: "auto",
+	maxParallelWorkers: 3,
+	workerIsolation: "shared-cwd",
 	subagentTimeouts: {
 		promptMs: 300_000,
 		recoveryPromptMs: 120_000,
@@ -449,6 +467,10 @@ export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigK
 			return config.paths.plansDir;
 		case "cmuxVisibility":
 			return config.cmuxVisibility;
+		case "maxParallelWorkers":
+			return config.maxParallelWorkers;
+		case "workerIsolation":
+			return config.workerIsolation;
 		case "subagentTimeouts.promptMs":
 			return config.subagentTimeouts.promptMs;
 		case "subagentTimeouts.recoveryPromptMs":
@@ -749,6 +771,32 @@ function normalizeOrchConfigOverrides(
 		}
 	}
 
+	const maxParallelWorkersValue = value.maxParallelWorkers;
+	if (maxParallelWorkersValue !== undefined) {
+		if (
+			typeof maxParallelWorkersValue === "number" &&
+			Number.isFinite(maxParallelWorkersValue) &&
+			maxParallelWorkersValue >= 1 &&
+			maxParallelWorkersValue <= 8
+		) {
+			overrides.maxParallelWorkers = maxParallelWorkersValue;
+		} else {
+			warnings.push(`${label}.maxParallelWorkers must be a number between 1 and 8.`);
+		}
+	}
+
+	const workerIsolationValue = value.workerIsolation;
+	if (workerIsolationValue !== undefined) {
+		const workerIso = getStringValue(workerIsolationValue, `${label}.workerIsolation`, warnings);
+		if (workerIso !== undefined) {
+			if (workerIso === "shared-cwd" || workerIso === "worktree") {
+				overrides.workerIsolation = workerIso as OrchWorkerIsolation;
+			} else {
+				warnings.push(`${label}.workerIsolation must be one of "shared-cwd" or "worktree".`);
+			}
+		}
+	}
+
 	const subagentTimeoutsValue = value.subagentTimeouts;
 	if (subagentTimeoutsValue !== undefined) {
 		if (!isRecord(subagentTimeoutsValue)) {
@@ -936,6 +984,12 @@ function applyOrchConfigOverrides(base: OrchConfig, overrides: OrchConfigOverrid
 	if (overrides.cmuxVisibility !== undefined) {
 		next.cmuxVisibility = overrides.cmuxVisibility;
 	}
+	if (overrides.maxParallelWorkers !== undefined) {
+		next.maxParallelWorkers = overrides.maxParallelWorkers;
+	}
+	if (overrides.workerIsolation !== undefined) {
+		next.workerIsolation = overrides.workerIsolation;
+	}
 	if (overrides.subagentTimeouts?.promptMs !== undefined) {
 		next.subagentTimeouts.promptMs = overrides.subagentTimeouts.promptMs;
 	}
@@ -1093,6 +1147,12 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 			return;
 		case "cmuxVisibility":
 			overrides.cmuxVisibility = value as string as OrchCmuxVisibility;
+			return;
+		case "maxParallelWorkers":
+			overrides.maxParallelWorkers = value as number;
+			return;
+		case "workerIsolation":
+			overrides.workerIsolation = value as string as OrchWorkerIsolation;
 			return;
 		case "subagentTimeouts.promptMs":
 			overrides.subagentTimeouts ??= {};

@@ -38,6 +38,7 @@ export const GLYPHS = {
 export const ORCH_TOOL_NAMES = {
 	delegate: "orch_delegate",
 	parallel: "orch_parallel",
+	parallelWorkers: "orch_parallel_workers",
 	smartFriend: "orch_smart_friend",
 	todoWrite: "TodoWrite",
 	parallelSearch: "parallel_search",

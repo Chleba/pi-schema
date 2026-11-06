@@ -78,6 +78,34 @@ export async function initializeMissionState(
 	return handle;
 }
 
+/**
+ * Serializes read-modify-write cycles against one mission's state files (features.json,
+ * state.json, knowledge-base.md, guidelines.md) with an in-process promise-chain queue.
+ * File locking is not needed because every Orch run is an in-process SDK session sharing
+ * this module instance; cross-process writers would require real file locks (e.g. O_EXCL
+ * lockfiles), which no current Orch phase performs.
+ */
+export async function withMissionStateWriteLock<T>(handle: MissionStateHandle, operation: () => Promise<T>): Promise<T> {
+	const key = handle.paths.missionDir;
+	const previous = missionStateWriteQueues.get(key) ?? Promise.resolve(undefined);
+	let release: () => void = () => undefined;
+	const completion = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	missionStateWriteQueues.set(key, completion);
+	await previous.catch(() => undefined);
+	try {
+		return await operation();
+	} finally {
+		release();
+		if (missionStateWriteQueues.get(key) === completion) {
+			void completion.finally(() => missionStateWriteQueues.delete(key));
+		}
+	}
+}
+
+const missionStateWriteQueues = new Map<string, Promise<void>>();
+
 export async function updateMissionRuntimeState(
 	handle: MissionStateHandle,
 	patch: {
@@ -88,19 +116,21 @@ export async function updateMissionRuntimeState(
 		currentMilestoneId?: string | null;
 	},
 ): Promise<MissionLiveState> {
-	const featuresState = await readJsonFile<MissionFeaturesStateFile>(handle.paths.featuresFile);
-	const current = await readJsonFile<MissionLiveState>(handle.paths.stateFile);
-	const next = createLiveState(handle, featuresState, {
-		phase: patch.phase ?? current.phase,
-		currentFeatureIndex:
-			patch.currentFeatureIndex !== undefined ? patch.currentFeatureIndex : current.currentFeatureIndex,
-		currentFeatureId: patch.currentFeatureId !== undefined ? patch.currentFeatureId : current.currentFeatureId,
-		currentAttempt: patch.currentAttempt !== undefined ? patch.currentAttempt : current.currentAttempt,
-		currentMilestoneId:
-			patch.currentMilestoneId !== undefined ? patch.currentMilestoneId : current.currentMilestoneId,
+	return withMissionStateWriteLock(handle, async () => {
+		const featuresState = await readJsonFile<MissionFeaturesStateFile>(handle.paths.featuresFile);
+		const current = await readJsonFile<MissionLiveState>(handle.paths.stateFile);
+		const next = createLiveState(handle, featuresState, {
+			phase: patch.phase ?? current.phase,
+			currentFeatureIndex:
+				patch.currentFeatureIndex !== undefined ? patch.currentFeatureIndex : current.currentFeatureIndex,
+			currentFeatureId: patch.currentFeatureId !== undefined ? patch.currentFeatureId : current.currentFeatureId,
+			currentAttempt: patch.currentAttempt !== undefined ? patch.currentAttempt : current.currentAttempt,
+			currentMilestoneId:
+				patch.currentMilestoneId !== undefined ? patch.currentMilestoneId : current.currentMilestoneId,
+		});
+		await writeJsonFile(handle.paths.stateFile, next);
+		return next;
 	});
-	await writeJsonFile(handle.paths.stateFile, next);
-	return next;
 }
 
 export async function setMissionFeatureState(
@@ -243,9 +273,11 @@ export async function appendMissionKnowledgeBase(
 		return;
 	}
 
-	const existing = await readTextFile(handle.paths.knowledgeBaseFile);
-	const section = [`\n## ${title}`, ...lines.map((line) => `- ${line}`), ""].join("\n");
-	await writeTextFile(handle.paths.knowledgeBaseFile, `${existing.trimEnd()}\n${section}`);
+	await withMissionStateWriteLock(handle, async () => {
+		const existing = await readTextFile(handle.paths.knowledgeBaseFile);
+		const section = [`\n## ${title}`, ...lines.map((line) => `- ${line}`), ""].join("\n");
+		await writeTextFile(handle.paths.knowledgeBaseFile, `${existing.trimEnd()}\n${section}`);
+	});
 }
 
 export async function appendMissionGuidelines(
@@ -257,9 +289,11 @@ export async function appendMissionGuidelines(
 		return;
 	}
 
-	const existing = await readTextFile(handle.paths.guidelinesFile);
-	const section = [`\n## ${title}`, ...items.map((item) => `- ${item}`), ""].join("\n");
-	await writeTextFile(handle.paths.guidelinesFile, `${existing.trimEnd()}\n${section}`);
+	await withMissionStateWriteLock(handle, async () => {
+		const existing = await readTextFile(handle.paths.guidelinesFile);
+		const section = [`\n## ${title}`, ...items.map((item) => `- ${item}`), ""].join("\n");
+		await writeTextFile(handle.paths.guidelinesFile, `${existing.trimEnd()}\n${section}`);
+	});
 }
 
 export async function buildMissionPromptSharedState(
@@ -542,11 +576,14 @@ async function updateMissionFeaturesState(
 	handle: MissionStateHandle,
 	mutate: (state: MissionFeaturesStateFile) => void,
 ): Promise<MissionFeaturesStateFile> {
-	// TODO: add file locking if future Orch phases allow parallel workers/writers for goal state.
-	const state = await readJsonFile<MissionFeaturesStateFile>(handle.paths.featuresFile);
-	mutate(state);
-	await writeJsonFile(handle.paths.featuresFile, state);
-	return state;
+	// Read-modify-write cycles are serialized per mission directory by
+	// withMissionStateWriteLock so concurrent feature-state updates cannot lose writes.
+	return withMissionStateWriteLock(handle, async () => {
+		const state = await readJsonFile<MissionFeaturesStateFile>(handle.paths.featuresFile);
+		mutate(state);
+		await writeJsonFile(handle.paths.featuresFile, state);
+		return state;
+	});
 }
 
 async function readJsonFile<T>(path: string): Promise<T> {

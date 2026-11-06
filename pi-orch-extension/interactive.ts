@@ -1,22 +1,24 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { loadOrchConfig, type OrchRoleName } from "./config.ts";
+import { loadOrchConfig, type OrchLoadedConfig, type OrchRoleName } from "./config.ts";
 import { ORCH_TOOL_NAMES } from "./constants.ts";
 import { formatElapsed, LOADING_VERBS, SPINNER_FRAME_MS, VERB_ROTATE_MS } from "./loading.ts";
 import type { DelegationBuffer, DelegationEventKind } from "./mission-types.ts";
 import { loadOrchRolePrompt } from "./prompt-loader.ts";
 import { runVisiblePiSubagentInCmux } from "./cmux-pi-runner.ts";
-import { spawnOrchSubagent, spawnOrchSubagentWithStallRecovery, type OrchSubagentResult, type OrchSubagentStreamEvent } from "./role-runner.ts";
+import { spawnOrchSubagent, spawnOrchSubagentWithStallRecovery, type OrchSubagentOutputSource, type OrchSubagentRequest, type OrchSubagentResult, type OrchSubagentStreamEvent } from "./role-runner.ts";
 import type { OrchRuntimeState } from "./runtime.ts";
 import { TINYFISH_TOOL_NAME } from "./tinyfish.ts";
 import { PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME } from "./parallel-tools.ts";
+import { findOverlappingPathPairs, type OverlappingPathPair } from "./utils.ts";
 import {
 	renderDelegateCall,
 	renderDelegateResult,
 	renderParallelCall,
 	renderParallelResult,
+	renderParallelWorkersCall,
 	renderSmartFriendCall,
 	renderSmartFriendResult,
 	type SmartFriendBuffer,
@@ -74,6 +76,211 @@ const INTERACTIVE_SAFE_BASH_PATTERNS = [
 	/^\s*curl\s+(-[fsSLI]+\s+)?https?:\/\//i,
 	/^\s*wget\s+-O\s*-\s+https?:\/\//i,
 ];
+
+// ── Parallel dispatch (shared fan-out primitive) ───────────────────────────
+// Reusable behind orch_parallel today; Phase 1 worker roles build on it.
+
+export type ParallelDispatchTask = {
+	role: string;
+	task: string;
+	featureId?: string;
+	/** Declared repo-relative file scope for worker tasks (orch_parallel_workers). */
+	paths?: string[];
+};
+
+export type ParallelTaskOutcome = {
+	status: "success" | "failed" | "aborted";
+	featureId?: string;
+	output: string;
+	outputSource?: OrchSubagentOutputSource;
+	emptyFinalText?: boolean;
+	elapsedMs: number;
+	toolCalls?: number;
+	buffer: DelegationBuffer;
+};
+
+export type ParallelDispatchOptions = {
+	allowedRoles: readonly string[];
+	maxConcurrency?: number;
+	cwd: string;
+	configState: OrchLoadedConfig;
+	modelRegistry: ModelRegistry;
+	signal?: AbortSignal;
+	/** Test seam: replaces the real per-task runner when provided. */
+	executeTask?: (task: ParallelDispatchTask, index: number, total: number) => Promise<ParallelTaskOutcome>;
+	/** Test seam: replaces spawnOrchSubagent in the default per-task runner. */
+	spawnSubagent?: (request: OrchSubagentRequest) => Promise<OrchSubagentResult>;
+};
+
+export type ParallelDispatchResult = {
+	text: string;
+	parallelBuffers: DelegationBuffer[];
+};
+
+/**
+ * Runs independent Orch sub-agent tasks concurrently and renders one section per task.
+ * The default per-task runner always spawns with forceFresh so the session cache can
+ * never hand two concurrent runs one live SDK session (required for parallel dispatch).
+ */
+export async function dispatchParallelOrchTasks(
+	tasks: ParallelDispatchTask[],
+	options: ParallelDispatchOptions,
+): Promise<ParallelDispatchResult> {
+	for (const task of tasks) {
+		if (!options.allowedRoles.includes(task.role)) {
+			throw new Error(
+				`Parallel dispatch only accepts roles (${options.allowedRoles.join(", ")}). ` +
+				`Got role="${task.role}". Use orch_delegate for sequential worker/validator runs.`,
+			);
+		}
+	}
+
+	if (options.maxConcurrency !== undefined && tasks.length > options.maxConcurrency) {
+		throw new Error(`parallel dispatch of ${tasks.length} tasks exceeds cap of ${options.maxConcurrency}`);
+	}
+
+	const layoutGroupId = `parallel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const executeTask = options.executeTask ?? ((task: ParallelDispatchTask, index: number, total: number) =>
+		runParallelOrchTask(task, index, total, { ...options, layoutGroupId }));
+
+	const settleResults = await Promise.allSettled(tasks.map((task, index) => executeTask(task, index, tasks.length)));
+
+	const outputs: string[] = [];
+	const parallelBuffers: DelegationBuffer[] = [];
+	for (let i = 0; i < settleResults.length; i++) {
+		const settled = settleResults[i];
+		if (settled.status === "fulfilled") {
+			const r = settled.value;
+			const task = tasks[i];
+			parallelBuffers.push(r.buffer);
+			const label = r.featureId ?? `${task.role}-${i}`;
+			const degraded = r.emptyFinalText ? ` • ${r.outputSource}` : "";
+			const header = `## ${r.status === "success" ? "✓" : "✗"} Task ${i}: ${label} (${task.role}) — ${formatElapsed(r.elapsedMs)} • ${r.toolCalls} tool calls${degraded}`;
+			outputs.push(header);
+			if (r.buffer.finalWarnings.length > 0) {
+				outputs.push("", ...r.buffer.finalWarnings.map((warning) => `> Warning: ${warning.title} — ${warning.details}`));
+			}
+			outputs.push("", r.output.trim().length > 0 ? r.output : r.buffer.finalSummary || "No result provided.", "");
+		} else {
+			outputs.push(`## ✗ Task rejected: ${String(settled.reason)}`, "");
+		}
+	}
+
+	return { text: outputs.join("\n"), parallelBuffers };
+}
+
+export type ParallelWorkerTask = {
+	task: string;
+	featureId?: string;
+	paths: string[];
+};
+
+/**
+ * Orchestrates one orch_parallel_workers call: rejects overlapping declared path
+ * scopes before any spawn, then dispatches every task as a worker with the merged
+ * config's maxParallelWorkers cap.
+ */
+export async function runParallelWorkers(
+	tasks: ParallelWorkerTask[],
+	options: Omit<ParallelDispatchOptions, "allowedRoles" | "maxConcurrency">,
+): Promise<ParallelDispatchResult> {
+	const overlaps = findOverlappingPathPairs(tasks.map((task) => task.paths));
+	if (overlaps.length > 0) {
+		throw new Error(formatOverlappingPathsError(overlaps));
+	}
+
+	return dispatchParallelOrchTasks(
+		tasks.map((task) => ({ role: "worker", task: task.task, featureId: task.featureId, paths: task.paths })),
+		{ ...options, allowedRoles: ["worker"], maxConcurrency: options.configState.merged.maxParallelWorkers },
+	);
+}
+
+function formatOverlappingPathsError(overlaps: OverlappingPathPair[]): string {
+	return overlaps
+		.map((pair) => `paths overlap between task ${pair.a} and task ${pair.b} at ${pair.paths.map((path) => `"${path}"`).join(", ")}`)
+		.join("; ");
+}
+
+async function runParallelOrchTask(
+	task: ParallelDispatchTask,
+	index: number,
+	total: number,
+	options: ParallelDispatchOptions & { layoutGroupId: string },
+): Promise<ParallelTaskOutcome> {
+	// Parallel dispatch roles are a subset of the delegate roles (plan_codebase,
+	// research today; worker in Phase 1). The interactive prompt/option builders
+	// only accept DelegateRoleName, matching the original orch_parallel typing.
+	const role = task.role as DelegateRoleName;
+	const buffer = createDelegationBuffer(role, task.featureId ?? deriveDelegationFeatureId(task.task));
+	if (options.signal?.aborted) {
+		buffer.status = "aborted";
+		buffer.finalSummary = "Aborted.";
+		return { status: "aborted" as const, output: "Aborted.", elapsedMs: 0, buffer };
+	}
+	const startedAt = Date.now();
+	try {
+		const delegationPrompt = buildInteractiveDelegationPrompt(role, task.task, task.paths);
+		const delegationOptions = getInteractiveDelegationOptions(role);
+		const label = `${index}-${buffer.featureId}`;
+		const onStreamEvent = (event: OrchSubagentStreamEvent) => {
+			applyDelegationStreamEvent(buffer, event);
+			updateDelegationTiming(buffer);
+		};
+		const spawn = options.spawnSubagent ?? spawnOrchSubagent;
+		const result = await runVisiblePiSubagentInCmux({
+			role,
+			label,
+			prompt: delegationPrompt,
+			cwd: options.cwd,
+			configState: options.configState,
+			signal: options.signal,
+			toolNames: delegationOptions.toolNames,
+			onStreamEvent,
+			parallelIndex: index,
+			parallelTotal: total,
+			layoutGroupId: options.layoutGroupId,
+		}) ?? await spawn({
+			role,
+			label,
+			prompt: delegationPrompt,
+			cwd: options.cwd,
+			configState: options.configState,
+			modelRegistry: options.modelRegistry,
+			forceFresh: true,
+			signal: options.signal,
+			...delegationOptions,
+			onStreamEvent,
+		});
+		applyDelegationFinalOutput(buffer, role, result.output);
+		applyDelegationRunWarnings(buffer, role, result.toolCalls, result.elapsedMs);
+		applyDelegationOutputSourceWarnings(buffer, result.emptyFinalText, result.outputSource);
+		updateDelegationTiming(buffer);
+		return {
+			status: "success" as const,
+			featureId: task.featureId,
+			output: result.output,
+			outputSource: result.outputSource,
+			emptyFinalText: result.emptyFinalText,
+			elapsedMs: result.elapsedMs || Date.now() - startedAt,
+			toolCalls: result.toolCalls,
+			buffer: cloneDelegationBuffer(buffer),
+		};
+	} catch (error) {
+		buffer.status = options.signal?.aborted || buffer.status === "aborted" ? "aborted" : "failed";
+		buffer.finalSummary = formatDelegationError(error);
+		updateDelegationTiming(buffer);
+		return {
+			status: "failed" as const,
+			featureId: task.featureId,
+			output: String(error),
+			outputSource: "tool_fallback" as const,
+			emptyFinalText: false,
+			elapsedMs: Date.now() - startedAt,
+			toolCalls: 0,
+			buffer: cloneDelegationBuffer(buffer),
+		};
+	}
+}
 
 export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeState): void {
 	pi.registerTool({
@@ -236,115 +443,52 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			state.configState = await loadOrchConfig(ctx.cwd);
 			const tasks = params.tasks as Array<{ role: DelegateRoleName; task: string; featureId?: string }>;
+			const result = await dispatchParallelOrchTasks(tasks, {
+				allowedRoles: PARALLEL_ROLE_NAMES,
+				cwd: ctx.cwd,
+				configState: state.configState!,
+				modelRegistry: ctx.modelRegistry,
+				signal,
+			});
 
-			// Reject mutating roles at runtime
-			for (const task of tasks) {
-				if (task.role === "worker" || task.role === "validator") {
-					throw new Error(
-						`orch_parallel only accepts read-only roles (plan_codebase, research). ` +
-						`Got role="${task.role}". Use orch_delegate for sequential worker/validator runs.`,
-					);
-				}
-			}
+			return { content: [{ type: "text", text: result.text }], details: { parallelBuffers: result.parallelBuffers } };
+		},
+	});
 
-			const layoutGroupId = `parallel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-			const settleResults = await Promise.allSettled(
-				tasks.map(async (task, index) => {
-					const buffer = createDelegationBuffer(task.role, task.featureId ?? deriveDelegationFeatureId(task.task));
-					if (signal?.aborted) {
-						buffer.status = "aborted";
-						buffer.finalSummary = "Aborted.";
-						return { index, role: task.role, status: "aborted" as const, output: "Aborted.", elapsedMs: 0, buffer };
-					}
-					const startedAt = Date.now();
-					try {
-						const delegationPrompt = buildInteractiveDelegationPrompt(task.role, task.task);
-						const delegationOptions = getInteractiveDelegationOptions(task.role);
-						const label = `${index}-${buffer.featureId}`;
-						const onStreamEvent = (event: OrchSubagentStreamEvent) => {
-							applyDelegationStreamEvent(buffer, event);
-							updateDelegationTiming(buffer);
-						};
-						const result = await runVisiblePiSubagentInCmux({
-							role: task.role,
-							label,
-							prompt: delegationPrompt,
-							cwd: ctx.cwd,
-							configState: state.configState!,
-							signal,
-							toolNames: delegationOptions.toolNames,
-							onStreamEvent,
-							parallelIndex: index,
-							parallelTotal: tasks.length,
-							layoutGroupId,
-						}) ?? await spawnOrchSubagent({
-							role: task.role,
-							label,
-							prompt: delegationPrompt,
-							cwd: ctx.cwd,
-							configState: state.configState!,
-							modelRegistry: ctx.modelRegistry,
-							forceFresh: true,
-							signal,
-							...delegationOptions,
-							onStreamEvent,
-						});
-						applyDelegationFinalOutput(buffer, task.role, result.output);
-						applyDelegationRunWarnings(buffer, task.role, result.toolCalls, result.elapsedMs);
-						applyDelegationOutputSourceWarnings(buffer, result.emptyFinalText, result.outputSource);
-						updateDelegationTiming(buffer);
-						return {
-							index,
-							role: task.role,
-							featureId: task.featureId,
-							status: "success" as const,
-							output: result.output,
-							outputSource: result.outputSource,
-							emptyFinalText: result.emptyFinalText,
-							elapsedMs: result.elapsedMs || Date.now() - startedAt,
-							toolCalls: result.toolCalls,
-							buffer: cloneDelegationBuffer(buffer),
-						};
-					} catch (error) {
-						buffer.status = signal?.aborted || buffer.status === "aborted" ? "aborted" : "failed";
-						buffer.finalSummary = formatDelegationError(error);
-						updateDelegationTiming(buffer);
-						return {
-							index,
-							role: task.role,
-							featureId: task.featureId,
-							status: "failed" as const,
-							output: String(error),
-							outputSource: "tool_fallback" as const,
-							emptyFinalText: false,
-							elapsedMs: Date.now() - startedAt,
-							toolCalls: 0,
-							buffer: cloneDelegationBuffer(buffer),
-						};
-					}
-				}),
-			);
+	// ── orch_parallel_workers ──
+	pi.registerTool({
+		name: ORCH_TOOL_NAMES.parallelWorkers,
+		label: "Orch Parallel Workers",
+		description: "Run multiple independent worker tasks in parallel with disjoint file scopes. Each task declares the repo-relative paths it may create or modify; if any two tasks' declared paths overlap (equal, or one a directory prefix of the other), the whole call is rejected before any worker is spawned. Concurrency is capped by the maxParallelWorkers config (default 3). Use this instead of several sequential orch_delegate role=worker calls when the tasks don't depend on each other's output and touch disjoint files.",
+		promptSnippet: "Run multiple independent implementation tasks concurrently as workers with strictly disjoint declared file scopes; overlapping paths are rejected before any spawn, and concurrency is capped by maxParallelWorkers.",
+		promptGuidelines: [
+			"Use orch_parallel_workers only when you have two or more independent implementation tasks that do not depend on each other's output and can be given disjoint file scopes.",
+			"Declare every repo-relative path (file or directory) each task may create or modify in its paths array. The guard rejects the whole call before any spawn if two tasks' declared paths overlap — equal paths, or one being a directory prefix of the other.",
+			"Keep each task self-contained: include relevant context and expected output in the task string; each worker sees only its own task plus its file scope.",
+			"Do not submit more tasks than the maxParallelWorkers config allows (default 3) — exceeding the cap rejects the call.",
+			"On partial failure, settled results are final: re-delegate only the failed or unfinished tasks as follow-ups; never restart completed work.",
+		],
+		parameters: Type.Object({
+			tasks: Type.Array(Type.Object({
+				task: Type.String({ description: "Self-contained implementation task for this worker — the sub-agent sees only this string plus its file scope, so include relevant file paths, constraints, and the exact output expected." }),
+				featureId: Type.Optional(Type.String({ description: "Optional short label for this parallel worker task" })),
+				paths: Type.Array(Type.String(), { minItems: 1, description: "Repo-relative files or directories this worker may create or modify. Must be disjoint from every other task's paths; overlapping declarations reject the whole call before any spawn." }),
+			}), { minItems: 2, description: "Array of independent implementation tasks to run concurrently as workers. Each entry declares a self-contained task and the repo-relative paths it owns; all path sets must be pairwise disjoint." }),
+		}),
+		executionMode: "sequential",
+		renderShell: "self",
+		renderCall: renderParallelWorkersCall,
+		renderResult: renderParallelResult,
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			state.configState = await loadOrchConfig(ctx.cwd);
+			const result = await runParallelWorkers(params.tasks as ParallelWorkerTask[], {
+				cwd: ctx.cwd,
+				configState: state.configState!,
+				modelRegistry: ctx.modelRegistry,
+				signal,
+			});
 
-			const outputs: string[] = [];
-			const parallelBuffers: DelegationBuffer[] = [];
-			for (const settled of settleResults) {
-				if (settled.status === "fulfilled") {
-					const r = settled.value;
-					parallelBuffers.push(r.buffer);
-					const label = r.featureId ?? `${r.role}-${r.index}`;
-					const degraded = r.emptyFinalText ? ` • ${r.outputSource}` : "";
-					const header = `## ${r.status === "success" ? "✓" : "✗"} Task ${r.index}: ${label} (${r.role}) — ${formatElapsed(r.elapsedMs)} • ${r.toolCalls} tool calls${degraded}`;
-					outputs.push(header);
-					if (r.buffer.finalWarnings.length > 0) {
-						outputs.push("", ...r.buffer.finalWarnings.map((warning) => `> Warning: ${warning.title} — ${warning.details}`));
-					}
-					outputs.push("", r.output.trim().length > 0 ? r.output : r.buffer.finalSummary || "No result provided.", "");
-				} else {
-					outputs.push(`## ✗ Task rejected: ${String(settled.reason)}`, "");
-				}
-			}
-
-			return { content: [{ type: "text", text: outputs.join("\n") }], details: { parallelBuffers } };
+			return { content: [{ type: "text", text: result.text }], details: { parallelBuffers: result.parallelBuffers } };
 		},
 	});
 
@@ -458,6 +602,7 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			"- Any task that needs independent review or validation → orch_delegate role=validator",
 			"- Any task where you are stuck or low-confidence → orch_smart_friend",
 			"- Multiple read-only intelligence tasks at once → orch_parallel with plan_codebase or research roles",
+			"- Multiple independent implementation tasks with disjoint file scopes → orch_parallel_workers",
 			"",
 			"### When you MAY work directly:",
 			"- Answering a quick factual question from your existing knowledge",
@@ -476,7 +621,7 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			`Use ${ORCH_TOOL_NAMES.delegate} role=validator for independent review after a worker completes.`,
 			`Use ${ORCH_TOOL_NAMES.delegate} role=plan_codebase for read-only inspection of requested files/areas and factual context summaries only. Do not ask it for bug hunting, feature discovery/proposals, recommendations, architectural judgment, risk analysis unless explicitly requested, implementation planning, or worker-task planning.`,
 			`Use ${ORCH_TOOL_NAMES.delegate} role=research for general web, docs, current-info, Context7, Parallel, TinyFish, and documentation research.`,
-			"Use orch_parallel to run multiple read-only sub-agents concurrently — only plan_codebase and research roles. Writes require sequential orch_delegate.",
+			"Use orch_parallel to run multiple read-only sub-agents concurrently — only plan_codebase and research roles. Use orch_parallel_workers for independent write tasks with disjoint file scopes; other writes require sequential orch_delegate.",
 			`Use ${ORCH_TOOL_NAMES.smartFriend} when you are genuinely stuck and need a read-only advisor.`,
 			"Do not spawn or request an orchestrator sub-agent for orchestration. The main Pi agent is already the orchestrator.",
 			"Do not silently switch into autonomous goal mode. Full autonomous execution only begins when the user explicitly invokes /orch goal.",
@@ -511,7 +656,7 @@ function getInteractiveDelegationOptions(role: DelegateRoleName): {
 	}
 }
 
-function buildInteractiveDelegationPrompt(role: DelegateRoleName, task: string): string {
+function buildInteractiveDelegationPrompt(role: DelegateRoleName, task: string, fileScopePaths?: readonly string[]): string {
 	switch (role) {
 		case "plan_codebase":
 			return [
@@ -544,9 +689,22 @@ function buildInteractiveDelegationPrompt(role: DelegateRoleName, task: string):
 				task,
 			].join("\n");
 		case "worker":
+			if (fileScopePaths !== undefined && fileScopePaths.length > 0) {
+				return [task, "", buildWorkerFileScopeSection(fileScopePaths)].join("\n");
+			}
+			return task;
 		case "validator":
 			return task;
 	}
+}
+
+export function buildWorkerFileScopeSection(paths: readonly string[]): string {
+	return [
+		"## File Scope",
+		"You may only create or modify files under these repo-relative paths:",
+		...paths.map((path) => `- ${path}`),
+		"Do not run git add/commit/stash/reset/clean.",
+	].join("\n");
 }
 
 function stripResearchShellWrappers(command: string): string {
@@ -574,7 +732,7 @@ function isInteractiveReadOnlyBashCommand(command: string): boolean {
 	return INTERACTIVE_SAFE_BASH_PATTERNS.some((pattern) => pattern.test(cleaned));
 }
 
-function createDelegationBuffer(role: OrchRoleName, featureId: string): DelegationBuffer {
+export function createDelegationBuffer(role: OrchRoleName, featureId: string): DelegationBuffer {
 	const startedAt = Date.now();
 	return {
 		role,

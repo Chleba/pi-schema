@@ -137,6 +137,10 @@ export type OrchWorkerSubagentRequest = {
 	validationContract: ValidationContract;
 	sharedState: MissionPromptSharedState;
 	steering?: SteeringResult;
+	/** Optional prompt section appended verbatim (e.g., the File Scope section for parallel worker batches). */
+	fileScopeSection?: string;
+	/** When true, bypass the per-role session cache. Required when running workers concurrently. */
+	forceFresh?: boolean;
 	cwd: string;
 	configState: OrchLoadedConfig;
 	modelRegistry: ModelRegistry;
@@ -676,6 +680,7 @@ export async function runOrchWorkerSubagent(request: OrchWorkerSubagentRequest):
 		modelRegistry: request.modelRegistry,
 		signal: request.signal,
 		onStreamEvent: request.onStreamEvent,
+		forceFresh: request.forceFresh,
 	});
 }
 
@@ -1417,6 +1422,7 @@ function buildWorkerSubagentPrompt(request: OrchWorkerSubagentRequest): string {
 		"Return strict JSON only with this shape:",
 		'{ "summary": "string", "changes": ["path: description"], "testsRun": ["string"], "notes": ["string"], "followUps": ["string"], "handoff": "string" }',
 		"The handoff must help a fresh validator understand what changed, what was verified, and what still needs scrutiny.",
+		...(request.fileScopeSection ? ["", request.fileScopeSection] : []),
 	].join("\n");
 }
 

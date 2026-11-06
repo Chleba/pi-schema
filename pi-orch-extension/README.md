@@ -7,6 +7,7 @@ It adds:
 - interactive orchestrator behavior during normal chat
 - a Claude Code-like `TodoWrite` checklist for the main Pi orchestrator
 - Orch sub-agents via `orch_delegate` (validator runs are always fresh; other roles may reuse cached context)
+- Parallel fan-out via `orch_parallel` (read-only roles) and `orch_parallel_workers` (independent write tasks with disjoint file scopes)
 - orchestrator-only advisor guidance via `orch_smart_friend`
 - autonomous goal mode via `/orch goal`
 - reusable read-only codebase onboarding via `/start [must-read-file ...]`
@@ -67,7 +68,7 @@ That lets you iterate in-place and reload with `/reload`.
 - `model-command.ts` - `/orch-model` sub-agent model selector and persistence
 - `config.ts` - Orch config schema, defaults, validation, load/save helpers
 - `cmux-streaming.ts` - caller-anchored cmux worker/validator split-pane setup and raw role stream tailing
-- `interactive.ts` - default interactive orchestrator behavior plus `TodoWrite`, `orch_delegate`, and `orch_smart_friend`
+- `interactive.ts` - default interactive orchestrator behavior plus `TodoWrite`, `orch_delegate`, `orch_parallel`, `orch_parallel_workers`, and `orch_smart_friend`
 - Goal engine modules - autonomous `/orch goal` execution, deterministic planning/steering, milestones, conditional validation, live goal block UI, and goal state snapshots
 - `tool-renderers.ts` - compact built-in tool rendering for subtler chat activity
 - `messages.ts` - Orch event message renderer/helpers
@@ -151,6 +152,8 @@ Additional custom tools:
   - `validator`
   - `plan_codebase` - lower-cost, read-only codebase inspection and factual context summaries only
   - `research`
+- `orch_parallel` - run multiple read-only sub-agents (`plan_codebase`, `research`) concurrently in a single call
+- `orch_parallel_workers` - run independent worker tasks concurrently; each task declares repo-relative file scopes, overlapping scopes are rejected before any spawn, and the batch size is capped by `maxParallelWorkers`
 - `orch_smart_friend` - ask a read-only advisor for a second opinion when the orchestrator is stuck
 - `tinyfish` - run the TinyFish web automation/search agent for current web search, source lookup, live website extraction, and scraping
 - `ask_user` - structured clarifying questions for plan preparation (provided by the separate `ask` extension from `pi-chleba-extensions`; the orchestrator prompt references it)
@@ -246,13 +249,22 @@ Implemented pieces:
 1. The main Pi agent orchestrates the goal
 2. Orch creates a simple goal execution plan from the goal
 3. Orch creates a live goal state directory under the configured goal runs directory
-4. Worker sub-agent executes each feature, usually reusing its cached role session context when the configuration matches
+4. Orch partitions features into batches by declared file scope; size-2+ batches run first-attempt workers concurrently (capped by `maxParallelWorkers`, fresh sessions), while solo features run sequentially, usually reusing their cached role session context when the configuration matches
 5. Validator sub-agent reviews a feature only when conditional policy says validation is needed; validator runs are always fresh
 6. If validation fails, Orch generates deterministic fix tasks and optional follow-up instructions
 7. Worker executes the fix tasks on the next attempt
 8. After each milestone, validator performs milestone-level validation
 9. Validator performs final goal validation
 10. Final goal record is written to the configured goal runs directory
+
+Worktree isolation (`workerIsolation: "worktree"`, opt-in; default `shared-cwd` is unchanged):
+
+- size-2+ batch members each work in their own git worktree under `.pi/orch/worktrees/<missionId>/<featureId>` on branch `orch/<missionId>/<featureId>`, with the worker's cwd set to that worktree
+- per-feature validation runs inside the feature's worktree so it validates exactly what the worker produced there; milestone-level and final validators keep running on the main tree
+- after a batch settles, each validated feature's output is committed on its branch and merged into the main tree sequentially in original feature order
+- cleanly merged branches have their worktrees removed; the branches themselves are kept for auditability
+- merge conflicts are never auto-resolved: the feature is marked failed, its worktree and branch are kept for steering, the conflicting paths are surfaced in the mission event/status text, remaining merges stop, and the main tree stays in git's conflicted state for manual resolution
+- solo features, interactive tools (`orch_delegate`, `orch_parallel_workers`), and `shared-cwd` mode run exactly as before with no extra git calls or branches
 
 Phase 4 behavior now implemented:
 
@@ -277,7 +289,9 @@ Phase 4 behavior now implemented:
   - pane creation is anchored to the current caller pane/workspace only, so Orch splits the active workspace instead of creating or drifting into a separate workspace view
   - if cmux cannot resolve the caller pane/workspace reliably, Orch skips split-pane streaming instead of guessing
   - panes are created once per goal, not once per feature
-  - worker runs stream sequentially into the same worker pane across the goal
+  - solo worker runs stream sequentially into the shared worker pane across the goal
+  - when a milestone batch runs multiple workers in parallel (and pane visibility is enabled), the base worker pane acts as grid slot 0 and one extra grid pane opens per additional concurrent worker; those batch panes close again when the batch settles
+  - each concurrent batch worker streams into its own per-feature log (`<featureId>.log` next to the role logs) so concurrent streams never interleave; solo features keep using the shared `worker.log`
   - validator runs stream sequentially into the same validator pane across the goal
   - raw thinking/text deltas are appended to role-specific goal logs and tailed live in the cmux panes
   - pane management is cmux-only for v1 and uses cmux's programmable API
@@ -344,6 +358,9 @@ Project config overrides user config.
     "learningExtraction": 100000,
     "contextWarning": 80000
   },
+  "maxParallelWorkers": 3,
+  "workerIsolation": "shared-cwd",
+  "cmuxVisibility": "auto",
   "paths": {
     "userProfileFile": "orch/user-profile.json",
     "projectContextFile": ".pi/orch/project-context.json",

@@ -67,7 +67,7 @@ async function isCmuxAvailable(): Promise<boolean> {
 	return cmuxGloballyAvailable;
 }
 
-function shouldCreatePane(visibility: OrchCmuxVisibility): boolean {
+export function shouldCreatePane(visibility: OrchCmuxVisibility): boolean {
 	return visibility === "panes" || visibility === "auto";
 }
 

@@ -54,6 +54,32 @@ codebase already answers.
   findings allow.
 - Keep summaries crisp and operational: what happened, what's left, what's next. Skip narrative.
 
+## Parallel workers
+
+You can run several independent worker tasks concurrently with `orch_parallel_workers`. Split a goal
+into parallel worker tasks only when:
+- The tasks are genuinely independent — none depends on another task's output, and no task needs to
+  read files that another task is creating or modifying.
+- You can give each task a disjoint file scope: the repo-relative paths it may create or modify must
+  not overlap with any other task's declared paths (no shared files, and no task declaring a directory
+  that contains another task's files).
+
+Declare scopes in each task's `paths` array — every repo-relative file or directory the worker may
+create or modify. The disjointness check is deterministic code, not judgment: if any two tasks'
+declared paths overlap (equal, or one a directory prefix of the other), the whole call is rejected
+before any worker is spawned. When you are unsure whether scopes are disjoint, split differently or
+delegate sequentially with `orch_delegate`.
+
+Concurrency is capped by the `maxParallelWorkers` config — do not submit more tasks than the cap in
+one call; issue another call for remaining independent work instead.
+
+On partial failure, settled results are final: a task that completed stays done. Re-delegate only the
+failed or unfinished tasks as focused follow-ups — never restart completed work. The stalled /
+looping / hard_ceiling guidance below applies per task.
+
+During a fan-out each parallel task maps to its own todo and multiple todos may be `in_progress`
+concurrently until the call settles; mark them completed as their results arrive.
+
 ## Output expectations
 
 - Plans: structured, executable, concise — a reader should be able to start work from them
@@ -66,7 +92,7 @@ in_progress, and completed statuses accurate as work moves.
 
 ## Task discipline
 
-- Work exactly one todo at a time. Mark it completed immediately when done — never batch completions at the end of a task.
+- Work exactly one todo at a time, except during an `orch_parallel_workers` fan-out where each parallel task maps to its own todo and multiple todos may be in_progress concurrently until the call settles. Mark todos completed immediately when done — never batch completions at the end of a task.
 - When you have enough information to act, act immediately. Do not re-derive facts already established in the conversation or re-litigate decisions that have already been made.
 - Scope your thinking to the next concrete step: think briefly before each action rather than planning the whole task upfront in one large reasoning burst.
 - When weighing options, give a recommendation with the main tradeoff instead of an exhaustive survey of all alternatives.

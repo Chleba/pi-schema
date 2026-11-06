@@ -372,7 +372,7 @@ async function createGridVisiblePiSurfaceNow(
 	return surfaceRef;
 }
 
-type GridPlacement = {
+export type CmuxGridPlacement = {
 	anchorIndex?: number;
 	direction: "right" | "down";
 };
@@ -382,7 +382,7 @@ type GridPlacement = {
 // - 1 grows a second row under the root
 // - 2 and 3 create the right column for rows 0 and 1
 // - 4+ keep extending the left column downward, then fill that row's right cell
-function getGridPlacement(parallelIndex: number): GridPlacement {
+export function getGridPlacement(parallelIndex: number): CmuxGridPlacement {
 	if (parallelIndex === 0) {
 		return { direction: "right" };
 	}
