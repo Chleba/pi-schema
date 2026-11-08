@@ -18,6 +18,10 @@ compile step.
   `X-User-ID` header for per-user queuing. **Supersedes lmstudio** (and the
   unversioned vllm extension) — those are disabled in
   `~/.pi/agent/extensions-disabled/`.
+- **chd-gateway** — Registers the self-hosted "chd-gateway" LLM gateway
+  (OpenAI-compatible) as a custom provider. Discovers the model catalog live
+  from `GET {baseUrl}/models` on every catalog refresh, and supports
+  `/login chd-gateway` to store the gateway base URL and `chd_` API key.
 - **lmstudio** *(disabled — superseded by ollamamq)* — Connects pi to a local
   LM Studio server on another PC. Discovers models from the `/v1/models`
   endpoint at startup and registers them under the `lmstudio` provider. Server
@@ -109,6 +113,27 @@ Env vars (optional):
 
 > Tip: set per-model context windows with `OLLAMA_MQ_MODEL_CTX` to match the
 > `max_ctx` values in your ollamaMQ `appconf.yaml`.
+
+### chd-gateway
+
+No configuration needed if the gateway runs at the default address. On startup
+(and on every catalog refresh) the extension fetches the model list from
+`GET {baseUrl}/models` and registers it under the `chd-gateway` provider. Run
+`/login chd-gateway` and pick "Sign in with an account" to store the gateway
+base URL and API key; stored credentials take precedence over the env vars
+below. Reasoning support is detected from the model id (same
+known-thinking-families rules as ollamamq) and can be overridden per id with
+the classification env vars.
+
+Env vars (optional):
+
+| Var | Default |
+| --- | ------- |
+| `CHD_GATEWAY_URL` | `http://127.0.0.1:11435/v1` (gateway base URL, including `/v1`) |
+| `CHD_GATEWAY_API_KEY` | — (bearer key, minted in the gateway web console) |
+| `CHD_GATEWAY_NON_REASONING_MODELS` | — (ids forced to reasoning OFF; checked first) |
+| `CHD_GATEWAY_REASONING_MODELS` | — (ids forced to reasoning ON) |
+| `CHD_GATEWAY_EFFORT_MODELS` | — (ids forced to graded `reasoning_effort`; otherwise only glm-5.x ids get graded effort) |
 
 ### lmstudio
 

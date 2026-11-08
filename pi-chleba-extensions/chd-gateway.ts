@@ -33,6 +33,13 @@
  *   gateway's web console.
  * - CHD_GATEWAY_URL: gateway base URL including /v1. Defaults to "http://127.0.0.1:11435/v1"
  *   (the gateway's default listen address 127.0.0.1:11435).
+ *
+ * Model classification env overrides (substring match on model id, applied whenever the model
+ * catalog is built; the gateway exposes no per-model capability metadata):
+ * - CHD_GATEWAY_NON_REASONING_MODELS: force reasoning OFF (checked first).
+ * - CHD_GATEWAY_REASONING_MODELS: force reasoning ON.
+ * - CHD_GATEWAY_EFFORT_MODELS: force graded reasoning_effort ON; otherwise only glm-5.x ids
+ *   get graded effort.
  */
 import type { Api, Credential, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
@@ -71,10 +78,11 @@ function credentialBaseUrl(credentials: OAuthCredentials): string | undefined {
  * `gatewayUrl` field; see the header comment for why extra fields survive pi's credential storage.
  */
 async function loginChdGateway(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-	const urlInput = (await callbacks.onPrompt({
-		message: "Gateway base URL, including /v1 (press enter for the default):",
-		placeholder: DEFAULT_BASE_URL,
-	})) ?? "";
+	const urlInput =
+		(await callbacks.onPrompt({
+			message: "Gateway base URL, including /v1 (press enter for the default):",
+			placeholder: DEFAULT_BASE_URL,
+		})) ?? "";
 	let baseUrl = DEFAULT_BASE_URL;
 	if (urlInput.trim() !== "") {
 		const normalized = normalizeBaseUrl(urlInput);
@@ -83,9 +91,11 @@ async function loginChdGateway(callbacks: OAuthLoginCallbacks): Promise<OAuthCre
 		}
 		baseUrl = normalized;
 	}
-	const key = ((await callbacks.onPrompt({
-		message: "API key (chd_...), minted in the gateway web console:",
-	})) ?? "").trim();
+	const key = (
+		(await callbacks.onPrompt({
+			message: "API key (chd_...), minted in the gateway web console:",
+		})) ?? ""
+	).trim();
 	if (key === "") throw new Error("chd-gateway: no API key entered");
 	return {
 		// OAuthCredentials requires refresh/expires. Gateway keys never expire, so expires uses the
@@ -158,17 +168,93 @@ function parseModelIds(payload: unknown): string[] {
 	return [...ids].sort();
 }
 
+/** Split a comma-separated env list into trimmed, lowercase entries. */
+function splitList(value: string | undefined): string[] {
+	return (value ?? "")
+		.split(",")
+		.map((entry) => entry.trim().toLowerCase())
+		.filter((entry) => entry.length > 0);
+}
+
+// Thinking-capable families known to work through the gateway. The gateway exposes no
+// per-model capability metadata, so anything not matched here is registered as non-reasoning
+// and can be opted in with CHD_GATEWAY_REASONING_MODELS.
+//   qwen[-.]3 / 3.5 / 3.8 | deepseek(-...)-r1 | think(er) incl. rwkv-thinker | gemma-4
+//   gpt-oss | minimax-m2 | kimi(-k2) | glm-4.5 / glm-4.6 / glm-5.x | hermes | nova | command-a | internlm
+const REASONING_MODEL_PATTERN =
+	/qwen[-_.]?3|deepseek[-\w.]*r1|think|gemma-?4|gpt-oss|minimax[-_.]?m2|kimi|glm[-_.]?4[-_.]?[56]|glm[-_.]?5|hermes|nova|command-a|internlm/i;
+
+function supportsReasoning(id: string): boolean {
+	const lower = id.toLowerCase();
+	if (splitList(process.env.CHD_GATEWAY_NON_REASONING_MODELS).some((entry) => lower.includes(entry))) {
+		return false;
+	}
+	if (splitList(process.env.CHD_GATEWAY_REASONING_MODELS).some((entry) => lower.includes(entry))) {
+		return true;
+	}
+	return REASONING_MODEL_PATTERN.test(lower);
+}
+
+// Backends that accept OpenAI-style graded `reasoning_effort` (none/low/medium/high/max).
+// Opt other ids in with CHD_GATEWAY_EFFORT_MODELS.
+const EFFORT_MODEL_PATTERN = /glm[-_.]?5/i;
+
+function supportsGradedEffort(id: string): boolean {
+	const lower = id.toLowerCase();
+	if (splitList(process.env.CHD_GATEWAY_EFFORT_MODELS).some((entry) => lower.includes(entry))) {
+		return true;
+	}
+	return EFFORT_MODEL_PATTERN.test(lower);
+}
+
 function toChatModel(id: string, baseUrl: string): ProviderModelConfig {
-	return {
-		type: "chat",
+	const reasoning = supportsReasoning(id);
+	const model = {
+		type: "chat" as const,
 		id,
 		name: id,
 		baseUrl,
-		reasoning: false,
-		input: ["text"],
+		reasoning,
+		input: ["text"] as ("image" | "text")[],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: 32_768,
+	};
+	if (!reasoning) return model;
+	if (supportsGradedEffort(id)) {
+		// Graded-effort backend: pi's default "openai" thinking format sends top-level
+		// reasoning_effort; off maps to "none" (verified to disable thinking). minimal/
+		// xhigh have no backend equivalent and stay hidden.
+		return {
+			...model,
+			thinkingLevelMap: {
+				off: "none",
+				minimal: null,
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: null,
+				max: "max",
+			} as const,
+			compat: {
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: true,
+			} as const,
+		};
+	}
+	// This backend only speaks the Qwen chat-template thinking switch:
+	// chat_template_kwargs { enable_thinking: <bool>, preserve_thinking: true } toggles
+	// `reasoning_content` on/off. Graded effort is not expressible, so off/low/medium/high
+	// all stay visible but behave as plain on/off toggles, while minimal/xhigh/max are
+	// hidden as unsupported levels.
+	return {
+		...model,
+		thinkingLevelMap: { minimal: null, xhigh: null, max: null } as const,
+		compat: {
+			thinkingFormat: "qwen-chat-template",
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+		} as const,
 	};
 }
 
