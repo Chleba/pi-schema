@@ -3,7 +3,8 @@ import type { ExtensionAPI, ModelRegistry } from "@earendil-works/pi-coding-agen
 import { Type } from "typebox";
 
 import { loadOrchConfig, type OrchLoadedConfig, type OrchRoleName } from "./config.ts";
-import { ORCH_TOOL_NAMES } from "./constants.ts";
+import { ORCH_TOOL_NAMES, ORCH_WIDGET_IDS } from "./constants.ts";
+import { SubagentLivePanelComponent } from "./live-panels.ts";
 import { formatElapsed, LOADING_VERBS, SPINNER_FRAME_MS, VERB_ROTATE_MS } from "./loading.ts";
 import type { DelegationBuffer, DelegationEventKind } from "./mission-types.ts";
 import { loadOrchRolePrompt } from "./prompt-loader.ts";
@@ -631,6 +632,31 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${interactivePrompt}`,
 		};
+	});
+
+	// Live sub-agent activity panels: one bordered box per running (or recently
+	// finished) sub-agent, above the editor. Enabled by the livePanels config.
+	pi.on("session_start", async (_event, ctx) => {
+		if (!ctx.hasUI) {
+			return;
+		}
+		if (!state.configState) {
+			state.configState = await loadOrchConfig(ctx.cwd);
+		}
+		if (state.configState.merged.livePanels !== "on") {
+			return;
+		}
+		ctx.ui.setWidget(
+			ORCH_WIDGET_IDS.livePanels,
+			(tui) => new SubagentLivePanelComponent(tui, () => state.configState?.merged.maxLinesPerBox ?? 5),
+			{ placement: "aboveEditor" },
+		);
+	});
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		if (ctx.hasUI) {
+			ctx.ui.setWidget(ORCH_WIDGET_IDS.livePanels, undefined);
+		}
 	});
 }
 

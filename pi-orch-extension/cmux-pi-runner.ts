@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { getOrchSubagentTimeoutsForRole, type OrchLoadedConfig, type OrchRoleName } from "./config.ts";
+import { emitSubagentPanelEvent, nextOrchSubagentRunId } from "./live-panels.ts";
 import type { OrchSubagentResult, OrchSubagentStreamEvent } from "./role-runner.ts";
 
 const execFileAsync = promisify(execFile);
@@ -76,6 +77,8 @@ type RunVisiblePiSubagentRequest = {
 	signal?: AbortSignal;
 	toolNames?: string[];
 	onStreamEvent?: (event: OrchSubagentStreamEvent) => void;
+	/** Optional stable panel run id shared with the in-process runner path. */
+	runId?: string;
 	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	parallelIndex?: number;
 	parallelTotal?: number;
@@ -127,6 +130,8 @@ export async function runVisiblePiSubagentInCmux(
 		return undefined;
 	}
 
+	const panelRunId = request.runId ?? nextOrchSubagentRunId();
+	emitSubagentPanelEvent({ type: "run_start", id: panelRunId, role: request.role, label: request.label, at: Date.now() });
 	request.onStreamEvent?.({ role: request.role, type: "status", status: "starting" });
 	await writeFile(statusFile, JSON.stringify({ status: "running", role: request.role, label: request.label, surfaceRef, startedAt }, null, 2), "utf8");
 	await sendToSurface(workspaceRef, surfaceRef, buildPiCommand(request, promptFile));
@@ -137,11 +142,16 @@ export async function runVisiblePiSubagentInCmux(
 			await sendKeyToSurface(workspaceRef, surfaceRef, "ctrl-c");
 		});
 		request.onStreamEvent?.({ role: request.role, type: "status", status: "completed" });
+		emitSubagentPanelEvent({ type: "run_status", id: panelRunId, status: "done", at: Date.now() });
 		const elapsedMs = Date.now() - startedAt;
 		await writeFile(statusFile, JSON.stringify({ status: "completed", role: request.role, label: request.label, surfaceRef, elapsedMs }, null, 2), "utf8");
 		return buildVisiblePiResult(request, output, elapsedMs);
 	} catch (error) {
+		// A poll-loop exit is only an abort when the signal actually fired; a result-file
+		// poll timeout (no abort) is a failure, not an abort.
+		const wasAborted = request.signal?.aborted === true;
 		request.onStreamEvent?.({ role: request.role, type: "status", status: request.signal?.aborted ? "aborted" : "aborted" });
+		emitSubagentPanelEvent({ type: "run_status", id: panelRunId, status: wasAborted ? "aborted" : "failed", at: Date.now() });
 		await writeFile(statusFile, JSON.stringify({ status: "failed", role: request.role, label: request.label, surfaceRef, error: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - startedAt }, null, 2), "utf8");
 		throw error;
 	} finally {

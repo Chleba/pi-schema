@@ -30,6 +30,8 @@ export type OrchCmuxVisibility = "off" | "status" | "panes" | "auto";
 
 export type OrchWorkerIsolation = "shared-cwd" | "worktree";
 
+export type OrchLivePanels = "on" | "off";
+
 export type OrchSubagentRoleTimeouts = {
 	/** Stall/silence window for normal sub-agent prompt calls (ms). Resets on every stream event; fires only when the sub-agent goes quiet. */
 	promptMs: number;
@@ -62,6 +64,8 @@ export type OrchConfig = {
 	cmuxVisibility: OrchCmuxVisibility;
 	maxParallelWorkers: number;
 	workerIsolation: OrchWorkerIsolation;
+	livePanels: OrchLivePanels;
+	maxLinesPerBox: number;
 	subagentTimeouts: OrchSubagentTimeouts;
 };
 
@@ -72,6 +76,8 @@ export type OrchConfigOverrides = {
 	cmuxVisibility?: OrchCmuxVisibility;
 	maxParallelWorkers?: number;
 	workerIsolation?: OrchWorkerIsolation;
+	livePanels?: OrchLivePanels;
+	maxLinesPerBox?: number;
 	subagentTimeouts?: Partial<OrchSubagentTimeouts>;
 };
 
@@ -127,6 +133,8 @@ export const ORCH_CONFIG_KEYS = [
 	"cmuxVisibility",
 	"maxParallelWorkers",
 	"workerIsolation",
+	"livePanels",
+	"maxLinesPerBox",
 	"subagentTimeouts.promptMs",
 	"subagentTimeouts.recoveryPromptMs",
 	"subagentTimeouts.hardCeilingMs",
@@ -247,6 +255,14 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 	"workerIsolation": {
 		description: "File isolation mode for parallel workers: shared-cwd or worktree",
 		valueType: "string",
+	},
+	"livePanels": {
+		description: "Show a live activity panel above the editor while Orch sub-agents run: on or off",
+		valueType: "string",
+	},
+	"maxLinesPerBox": {
+		description: "Maximum body lines shown per live sub-agent panel box (1-20)",
+		valueType: "number",
 	},
 	"subagentTimeouts.promptMs": {
 		description: "Timeout in milliseconds for sub-agent prompt calls (default 300000 = 5 min)",
@@ -376,6 +392,8 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 	cmuxVisibility: "auto",
 	maxParallelWorkers: 3,
 	workerIsolation: "shared-cwd",
+	livePanels: "on",
+	maxLinesPerBox: 5,
 	subagentTimeouts: {
 		promptMs: 300_000,
 		recoveryPromptMs: 120_000,
@@ -393,6 +411,13 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 
 export function createDefaultOrchConfig(): OrchConfig {
 	return structuredClone(DEFAULT_ORCH_CONFIG);
+}
+
+export function clampOrchMaxLinesPerBox(value: number): number {
+	if (!Number.isFinite(value)) {
+		return 5;
+	}
+	return Math.min(20, Math.max(1, Math.round(value)));
 }
 
 export function getOrchSubagentTimeoutsForRole(config: OrchConfig, role: OrchRoleName): OrchSubagentRoleTimeouts {
@@ -471,6 +496,10 @@ export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigK
 			return config.maxParallelWorkers;
 		case "workerIsolation":
 			return config.workerIsolation;
+		case "livePanels":
+			return config.livePanels;
+		case "maxLinesPerBox":
+			return config.maxLinesPerBox;
 		case "subagentTimeouts.promptMs":
 			return config.subagentTimeouts.promptMs;
 		case "subagentTimeouts.recoveryPromptMs":
@@ -496,7 +525,7 @@ export function parseOrchConfigValue(key: OrchConfigKey, rawValue: string): Orch
 		if (!Number.isFinite(numericValue) || numericValue <= 0) {
 			throw new Error(`Config value for ${key} must be a positive number.`);
 		}
-		return numericValue;
+		return key === "maxLinesPerBox" ? clampOrchMaxLinesPerBox(numericValue) : numericValue;
 	}
 
 	return trimmed;
@@ -797,6 +826,27 @@ function normalizeOrchConfigOverrides(
 		}
 	}
 
+	const livePanelsValue = value.livePanels;
+	if (livePanelsValue !== undefined) {
+		const livePanels = getStringValue(livePanelsValue, `${label}.livePanels`, warnings);
+		if (livePanels !== undefined) {
+			if (livePanels === "on" || livePanels === "off") {
+				overrides.livePanels = livePanels as OrchLivePanels;
+			} else {
+				warnings.push(`${label}.livePanels must be one of "on" or "off".`);
+			}
+		}
+	}
+
+	const maxLinesPerBoxValue = value.maxLinesPerBox;
+	if (maxLinesPerBoxValue !== undefined) {
+		if (typeof maxLinesPerBoxValue === "number" && Number.isFinite(maxLinesPerBoxValue)) {
+			overrides.maxLinesPerBox = clampOrchMaxLinesPerBox(maxLinesPerBoxValue);
+		} else {
+			warnings.push(`${label}.maxLinesPerBox must be a number between 1 and 20.`);
+		}
+	}
+
 	const subagentTimeoutsValue = value.subagentTimeouts;
 	if (subagentTimeoutsValue !== undefined) {
 		if (!isRecord(subagentTimeoutsValue)) {
@@ -990,6 +1040,12 @@ function applyOrchConfigOverrides(base: OrchConfig, overrides: OrchConfigOverrid
 	if (overrides.workerIsolation !== undefined) {
 		next.workerIsolation = overrides.workerIsolation;
 	}
+	if (overrides.livePanels !== undefined) {
+		next.livePanels = overrides.livePanels;
+	}
+	if (overrides.maxLinesPerBox !== undefined) {
+		next.maxLinesPerBox = overrides.maxLinesPerBox;
+	}
 	if (overrides.subagentTimeouts?.promptMs !== undefined) {
 		next.subagentTimeouts.promptMs = overrides.subagentTimeouts.promptMs;
 	}
@@ -1153,6 +1209,12 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 			return;
 		case "workerIsolation":
 			overrides.workerIsolation = value as string as OrchWorkerIsolation;
+			return;
+		case "livePanels":
+			overrides.livePanels = value as string as OrchLivePanels;
+			return;
+		case "maxLinesPerBox":
+			overrides.maxLinesPerBox = clampOrchMaxLinesPerBox(value as number);
 			return;
 		case "subagentTimeouts.promptMs":
 			overrides.subagentTimeouts ??= {};

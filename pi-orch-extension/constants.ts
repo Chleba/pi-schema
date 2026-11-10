@@ -22,8 +22,11 @@ export const GLYPHS = {
 	recap: "※",
 	toolOut: "⎿",
 	boxTopLeft: "╭",
+	boxTopRight: "╮",
 	boxBottomLeft: "╰",
+	boxBottomRight: "╯",
 	boxVert: "│",
+	boxDash: "─",
 	done: "●",
 	pending: "○",
 	inProgress: "◆",
@@ -51,4 +54,5 @@ export const ORCH_WIDGET_IDS = {
 	missionThinking: "orch-mission-thinking",
 	missionProgress: "orch-mission-progress",
 	todos: "orch-todos",
+	livePanels: "orch-live-panels",
 } as const;

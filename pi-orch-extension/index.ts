@@ -64,6 +64,7 @@ export default function orchExtension(pi: ExtensionAPI): void {
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionBlock, undefined);
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionThinking, undefined);
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionProgress, undefined);
+			ctx.ui.setWidget(ORCH_WIDGET_IDS.livePanels, undefined);
 		}
 	});
 }

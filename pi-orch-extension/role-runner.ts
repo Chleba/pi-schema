@@ -12,14 +12,15 @@ import {
 	createReadToolDefinition,
 	createWriteToolDefinition,
 	DefaultResourceLoader,
+	defineTool,
 	getAgentDir,
 	ModelRegistry,
 	SessionManager,
 	SettingsManager,
-	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 import { getOrchSubagentTimeoutsForRole, type OrchLoadedConfig, type OrchRoleName } from "./config.ts";
+import { emitSubagentPanelEvent, nextOrchSubagentRunId } from "./live-panels.ts";
 import { computeEditPreviewDiff, computeWritePreviewDiff, formatInlineDiffSummary } from "./diff.ts";
 import type {
 	MissionFeature,
@@ -105,6 +106,8 @@ export type OrchSubagentRequest = {
 	forceFresh?: boolean;
 	/** Optional human-readable label for CMUX visibility panes and logs. */
 	label?: string;
+	/** Optional stable panel run id; lets a stall-nudge resume reuse the same live panel box. */
+	runId?: string;
 };
 
 export type OrchSubagentResult = {
@@ -229,7 +232,7 @@ function createSubagentActivityTracker(loopThreshold: number): SubagentActivityT
 	};
 }
 
-type OrchRoleToolDefinition = ToolDefinition<any, any, any>;
+type OrchRoleToolDefinition = ReturnType<typeof defineTool>;
 
 type OrchSubagentSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
 type CachedOrchSubagentSession = {
@@ -362,6 +365,8 @@ async function runPrimaryPromptWithStallDetection(
 
 export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<OrchSubagentResult> {
 	const startedAt = Date.now();
+	const panelRunId = request.runId ?? nextOrchSubagentRunId();
+	emitSubagentPanelEvent({ type: "run_start", id: panelRunId, role: request.role, label: request.label ?? request.role, at: startedAt });
 	const modelConfig = request.configState.merged.roles[request.role];
 	const model = resolveConfiguredModel(request.modelRegistry, modelConfig.provider, modelConfig.model, request.role);
 	const { session, isCached, boundExtensions, cacheKey } = await getOrCreateOrchSubagentSession(request, model);
@@ -391,6 +396,21 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		request.onStreamEvent?.(event);
 		if (cmuxHandle) {
 			writeSubagentCmuxEvent(cmuxHandle, event);
+		}
+		if (event.type === "status") {
+			// "starting" is covered by the run_start emitted above; non-completed final
+			// stream statuses are replaced by the true run status emitted after the prompt settles.
+			if (event.status === "aborted") {
+				emitSubagentPanelEvent({ type: "run_status", id: panelRunId, status: "aborted", at: Date.now() });
+			}
+			return;
+		}
+		if (event.type === "tool_call" || event.type === "tool_diff") {
+			emitSubagentPanelEvent({ type: "tool", id: panelRunId, line: `${event.label} ${event.detail}`, at: Date.now() });
+			return;
+		}
+		if (event.type === "text_delta") {
+			emitSubagentPanelEvent({ type: "text", id: panelRunId, delta: event.delta, at: Date.now() });
 		}
 	};
 	const unsubscribe = session.subscribe((event) => {
@@ -517,6 +537,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		}
 
 		emitStreamEvent({ role: request.role, type: "status", status: runStatus === "completed" ? "completed" : "aborted" });
+		emitSubagentPanelEvent({ type: "run_status", id: panelRunId, status: runStatus === "completed" ? "done" : runStatus, at: Date.now() });
 		const assistantMessage = findLastAssistantMessage(runMessages);
 		const usage = {
 			input: assistantMessage?.usage?.input ?? 0,
@@ -558,6 +579,9 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		};
 	} catch (error) {
 		cmuxCloseSummary = error instanceof Error ? `failed: ${error.message}` : "failed";
+		if (!wasAborted) {
+			emitSubagentPanelEvent({ type: "run_status", id: panelRunId, status: "failed", at: Date.now() });
+		}
 		if (isCached && cacheKey) {
 			await evictCachedOrchSubagentSession(cacheKey, session);
 		}
@@ -583,7 +607,10 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
  * to resume into; a stall there is returned as-is too.
  */
 export async function spawnOrchSubagentWithStallRecovery(request: OrchSubagentRequest): Promise<OrchSubagentResult> {
-	const result = await spawnOrchSubagent(request);
+	// Assign the run id here (instead of in spawnOrchSubagent) so the stall-nudge
+	// resume re-enters with the same id and the live panel keeps one box for both phases.
+	const baseRequest = request.runId ? request : { ...request, runId: nextOrchSubagentRunId() };
+	const result = await spawnOrchSubagent(baseRequest);
 	if (result.status !== "stalled") {
 		return result;
 	}
@@ -594,7 +621,7 @@ export async function spawnOrchSubagentWithStallRecovery(request: OrchSubagentRe
 	}
 
 	const resumeResult = await spawnOrchSubagent({
-		...request,
+		...baseRequest,
 		prompt: STALL_RESUME_NUDGE_PROMPT,
 	});
 
@@ -1066,20 +1093,20 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 	const overrides: OrchRoleToolDefinition[] = [];
 
 	if (getRequestedTools(request).includes(TINYFISH_TOOL_NAME)) {
-		overrides.push(createTinyFishToolDefinition());
+		overrides.push(defineTool(createTinyFishToolDefinition()));
 	}
 
 	if (getRequestedTools(request).includes(PARALLEL_SEARCH_TOOL_NAME)) {
-		overrides.push(createParallelSearchToolDefinition());
+		overrides.push(defineTool(createParallelSearchToolDefinition()));
 	}
 
 	if (getRequestedTools(request).includes(PARALLEL_FETCH_TOOL_NAME)) {
-		overrides.push(createParallelFetchToolDefinition());
+		overrides.push(defineTool(createParallelFetchToolDefinition()));
 	}
 
 	if (getRequestedTools(request).includes("bash")) {
 		const bashTool = createBashToolDefinition(request.cwd);
-		overrides.push({
+		overrides.push(defineTool({
 			...bashTool,
 			async execute(
 				toolCallId: ToolExecuteParams<typeof bashTool>[0],
@@ -1105,13 +1132,13 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 					ctx,
 				);
 			},
-		});
+		}));
 	}
 
 	// Wrap mutating tools so every sub-agent edit/write emits a review-first diff event.
 	if (getRequestedTools(request).includes("edit")) {
 		const editTool = createEditToolDefinition(request.cwd);
-		overrides.push({
+		overrides.push(defineTool({
 			...editTool,
 			async execute(
 				toolCallId: ToolExecuteParams<typeof editTool>[0],
@@ -1128,17 +1155,20 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 				}
 				return editTool.execute(toolCallId, params, signal, onUpdate, ctx);
 			},
-		});
+		}));
 	}
 
 	if (getRequestedTools(request).includes("write")) {
 		const writeTool = createWriteToolDefinition(request.cwd);
-		overrides.push({
+		overrides.push(defineTool({
 			...writeTool,
 			async execute(
 				toolCallId: ToolExecuteParams<typeof writeTool>[0],
 				params: ToolExecuteParams<typeof writeTool>[1],
 				signal: ToolExecuteParams<typeof writeTool>[2],
+				// The write tool never calls its update callback, so it is not forwarded to the
+				// inner call. The diff preview is emitted via onStreamEvent, and the _diff detail is
+				// added to the result below for the UI renderer.
 				onUpdate: ToolExecuteParams<typeof writeTool>[3],
 				ctx: ToolExecuteParams<typeof writeTool>[4],
 			) {
@@ -1148,13 +1178,16 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 				} else {
 					emitSubagentDiffPreview(request, "Write preview", params.path, undefined, preview.error);
 				}
-				const result = await writeTool.execute(toolCallId, params, signal, onUpdate, ctx);
+				const result = await writeTool.execute(toolCallId, params, signal, undefined, ctx);
 				return {
 					...result,
-					details: { ...((result.details as unknown as Record<string, unknown>) ?? {}), _diff: preview.ok === true ? preview.diff : undefined },
+					details: {
+						...((result.details as unknown as Record<string, unknown>) ?? {}),
+						_diff: preview.ok === true ? preview.diff : undefined,
+					} as unknown as typeof result.details,
 				};
 			},
-		});
+		}));
 	}
 
 	if (request.role !== "validator") {
@@ -1168,7 +1201,7 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 	const lsTool = createLsToolDefinition(request.cwd);
 
 	overrides.push(
-		{
+		defineTool({
 			...readTool,
 			async execute(
 				toolCallId: ToolExecuteParams<typeof readTool>[0],
@@ -1180,8 +1213,8 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 				assertValidatorPathAllowed(params.path, request.cwd, blockedRoots);
 				return readTool.execute(toolCallId, params, signal, onUpdate, ctx);
 			},
-		},
-		{
+		}),
+		defineTool({
 			...grepTool,
 			async execute(
 				toolCallId: ToolExecuteParams<typeof grepTool>[0],
@@ -1203,8 +1236,8 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 					details: undefined,
 				};
 			},
-		},
-		{
+		}),
+		defineTool({
 			...findTool,
 			async execute(
 				toolCallId: ToolExecuteParams<typeof findTool>[0],
@@ -1226,8 +1259,8 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 					details: undefined,
 				};
 			},
-		},
-		{
+		}),
+		defineTool({
 			...lsTool,
 			async execute(
 				toolCallId: ToolExecuteParams<typeof lsTool>[0],
@@ -1249,7 +1282,7 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 					details: undefined,
 				};
 			},
-		},
+		}),
 	);
 
 	return overrides;

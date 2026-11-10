@@ -361,6 +361,8 @@ Project config overrides user config.
   "maxParallelWorkers": 3,
   "workerIsolation": "shared-cwd",
   "cmuxVisibility": "auto",
+  "livePanels": "on",
+  "maxLinesPerBox": 5,
   "paths": {
     "userProfileFile": "orch/user-profile.json",
     "projectContextFile": ".pi/orch/project-context.json",
@@ -370,6 +372,11 @@ Project config overrides user config.
   }
 }
 ```
+
+Display options:
+
+- `livePanels: "on" | "off"` (default `"on"`) - shows a live activity box per running Orch sub-agent above the editor; finished runs stay visible for a few seconds before the box drops off
+- `maxLinesPerBox: number` (default 5, clamped 1..20) - maximum body lines per live panel box; newest tool lines are kept, the latest text tail is the last body line
 
 Relative path resolution:
 
