@@ -5,7 +5,12 @@ import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 
 const IMAGE_MARKER_PREFIX = "Image";
 const CLIPBOARD_IMAGE_FILE_PATTERN = String.raw`(?:pi-)?clipboard-[A-Za-z0-9-]+\.(?:png|jpg|jpeg|gif|webp)`;
-const PASTED_IMAGE_PATH_PATTERN = new RegExp(String.raw`(?:file:\/\/)?\/(?:[^\s'"\`]+\/)*${CLIPBOARD_IMAGE_FILE_PATTERN}`, "gi");
+// Segments exclude "/" so each path slash has exactly one parse: without this, the
+// inner `+` and the trailing `\/` can split the same slash two ways and the regex
+// backtracks exponentially on any non-matching multi-segment path (pi freezes at 100% CPU).
+const PASTED_IMAGE_PATH_PATTERN = new RegExp(String.raw`(?:file:\/\/)?\/(?:[^\s'"` + String.raw`\/]+\/)*${CLIPBOARD_IMAGE_FILE_PATTERN}`, "gi");
+// Non-global clone: the global pattern's lastIndex is stateful across .match() calls.
+const PASTED_IMAGE_PATH_EXACT_PATTERN = new RegExp(PASTED_IMAGE_PATH_PATTERN.source, "i");
 
 const MIME_TYPES_BY_EXTENSION: Record<string, string> = {
 	png: "image/png",
@@ -147,13 +152,16 @@ function readImageAttachment(image: PendingImageAttachment): ImageContent | unde
 	};
 }
 
-function findPastedImagePaths(text: string): string[] {
+export function findPastedImagePaths(text: string): string[] {
+	// matchAll starts from the regex's lastIndex, which .test/.match calls leave
+	// dangling after a success; reset so every input scans from the start.
+	PASTED_IMAGE_PATH_PATTERN.lastIndex = 0;
 	return Array.from(text.matchAll(PASTED_IMAGE_PATH_PATTERN), (match) => match[0]);
 }
 
 function normalizePastedImagePath(rawText: string): { path: string; mimeType: string } | undefined {
 	const trimmed = rawText.trim().replace(/^file:\/\//, "");
-	const match = trimmed.match(PASTED_IMAGE_PATH_PATTERN);
+	const match = trimmed.match(PASTED_IMAGE_PATH_EXACT_PATTERN);
 	if (!match || match[0] !== trimmed) {
 		return undefined;
 	}
