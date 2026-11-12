@@ -7,5 +7,6 @@
     "npm:pi-playwright",
     "npm:pi-orch-extension",
     "npm:pi-hermes-memory"
-  ]
+  ],
+  "deviceId": "137fa83c-325e-4887-bd76-eda0fac28d68"
 }
