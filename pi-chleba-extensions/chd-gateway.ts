@@ -40,6 +40,8 @@
  * - CHD_GATEWAY_REASONING_MODELS: force reasoning ON.
  * - CHD_GATEWAY_EFFORT_MODELS: force graded reasoning_effort ON; otherwise only glm-5.x ids
  *   get graded effort.
+ * - CHD_GATEWAY_NON_VISION_MODELS: force vision OFF (checked first).
+ * - CHD_GATEWAY_VISION_MODELS: force vision ON; otherwise only qwen3.8 and glm ids get vision.
  */
 import type { Api, Credential, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
@@ -207,15 +209,33 @@ function supportsGradedEffort(id: string): boolean {
 	return EFFORT_MODEL_PATTERN.test(lower);
 }
 
+// Image-capable families known to work through the gateway. The gateway exposes no
+// per-model capability metadata, so anything not matched here is registered as text-only
+// and can be opted in with CHD_GATEWAY_VISION_MODELS.
+//   qwen3.8 | glm
+const VISION_MODEL_PATTERN = /qwen[-_.]?3[-._]?8|glm/i;
+
+function supportsVision(id: string): boolean {
+	const lower = id.toLowerCase();
+	if (splitList(process.env.CHD_GATEWAY_NON_VISION_MODELS).some((entry) => lower.includes(entry))) {
+		return false;
+	}
+	if (splitList(process.env.CHD_GATEWAY_VISION_MODELS).some((entry) => lower.includes(entry))) {
+		return true;
+	}
+	return VISION_MODEL_PATTERN.test(lower);
+}
+
 function toChatModel(id: string, baseUrl: string): ProviderModelConfig {
 	const reasoning = supportsReasoning(id);
+	const vision = supportsVision(id);
 	const model = {
 		type: "chat" as const,
 		id,
 		name: id,
 		baseUrl,
 		reasoning,
-		input: ["text"] as ("image" | "text")[],
+		input: (vision ? ["text", "image"] : ["text"]) as ("image" | "text")[],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: 32_768,
