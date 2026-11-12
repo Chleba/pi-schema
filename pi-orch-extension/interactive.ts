@@ -460,13 +460,13 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 	pi.registerTool({
 		name: ORCH_TOOL_NAMES.parallelWorkers,
 		label: "Orch Parallel Workers",
-		description: "Run multiple independent worker tasks in parallel with disjoint file scopes. Each task declares the repo-relative paths it may create or modify; if any two tasks' declared paths overlap (equal, or one a directory prefix of the other), the whole call is rejected before any worker is spawned. Concurrency is capped by the maxParallelWorkers config (default 3). Use this instead of several sequential orch_delegate role=worker calls when the tasks don't depend on each other's output and touch disjoint files.",
+		description: "Run multiple independent worker tasks in parallel with disjoint file scopes. Each task declares the repo-relative paths it may create or modify; if any two tasks' declared paths overlap (equal, or one a directory prefix of the other), the whole call is rejected before any worker is spawned. Concurrency is capped by the maxParallelWorkers config (default 2). Use this instead of several sequential orch_delegate role=worker calls when the tasks don't depend on each other's output and touch disjoint files.",
 		promptSnippet: "Run multiple independent implementation tasks concurrently as workers with strictly disjoint declared file scopes; overlapping paths are rejected before any spawn, and concurrency is capped by maxParallelWorkers.",
 		promptGuidelines: [
 			"Use orch_parallel_workers only when you have two or more independent implementation tasks that do not depend on each other's output and can be given disjoint file scopes.",
 			"Declare every repo-relative path (file or directory) each task may create or modify in its paths array. The guard rejects the whole call before any spawn if two tasks' declared paths overlap — equal paths, or one being a directory prefix of the other.",
 			"Keep each task self-contained: include relevant context and expected output in the task string; each worker sees only its own task plus its file scope.",
-			"Do not submit more tasks than the maxParallelWorkers config allows (default 3) — exceeding the cap rejects the call.",
+			"Do not submit more tasks than the maxParallelWorkers config allows (default 2) — exceeding the cap rejects the call.",
 			"On partial failure, settled results are final: re-delegate only the failed or unfinished tasks as follow-ups; never restart completed work.",
 		],
 		parameters: Type.Object({

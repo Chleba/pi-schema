@@ -358,7 +358,7 @@ Project config overrides user config.
     "learningExtraction": 100000,
     "contextWarning": 80000
   },
-  "maxParallelWorkers": 3,
+  "maxParallelWorkers": 2,
   "workerIsolation": "shared-cwd",
   "cmuxVisibility": "auto",
   "livePanels": "on",

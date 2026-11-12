@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -223,7 +223,12 @@ describe("runAutonomousMission feature batches", () => {
 
 	it("runs three disjoint features in one batch with overlapping run windows and consistent state", async () => {
 		const configState = await loadOrchConfig(cwd);
-		expect(configState.merged.maxParallelWorkers).toBe(3);
+		expect(configState.merged.maxParallelWorkers).toBe(2);
+		// Three-way concurrency requires an explicit cap of 3 (the default is 2).
+		await mkdir(join(cwd, ".pi", "orch"), { recursive: true });
+		await writeFile(join(cwd, ".pi", "orch", "config.json"), JSON.stringify({ maxParallelWorkers: 3 }), "utf8");
+		const batchConfig = await loadOrchConfig(cwd);
+		expect(batchConfig.merged.maxParallelWorkers).toBe(3);
 		const features = [
 			makeFeature("feat-a", "Module A", ["Implement src/a.ts"]),
 			makeFeature("feat-b", "Module B", ["Implement src/b.ts"]),
@@ -234,7 +239,7 @@ describe("runAutonomousMission feature batches", () => {
 		installFakeSubagents(windows, workerRuns, { workerDelayMs: () => 60 });
 
 		const state = makeState("Build three independent modules");
-		const result = await runAutonomousMission(pi, makeCtx(cwd), "Build three independent modules", configState, state, {
+		const result = await runAutonomousMission(pi, makeCtx(cwd), "Build three independent modules", batchConfig, state, {
 			planGenerator: () => makePlan(features),
 		});
 
@@ -324,6 +329,9 @@ describe("runAutonomousMission feature batches", () => {
 	});
 
 	it("settles a mid-batch abort without hanging and records partial state", async () => {
+		// All three features must share one batch; the default cap of 2 would split them 2+1.
+		await mkdir(join(cwd, ".pi", "orch"), { recursive: true });
+		await writeFile(join(cwd, ".pi", "orch", "config.json"), JSON.stringify({ maxParallelWorkers: 3 }), "utf8");
 		const configState = await loadOrchConfig(cwd);
 		const features = [
 			makeFeature("feat-a", "Module A", ["Implement src/a.ts"]),

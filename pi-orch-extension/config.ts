@@ -249,7 +249,7 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		valueType: "string",
 	},
 	"maxParallelWorkers": {
-		description: "Maximum number of Orch workers that may run in parallel (1-8)",
+		description: "Maximum number of Orch workers that may run in parallel (1-8, default 2)",
 		valueType: "number",
 	},
 	"workerIsolation": {
@@ -390,7 +390,7 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 		plansDir: ".pi/orch/plans",
 	},
 	cmuxVisibility: "auto",
-	maxParallelWorkers: 3,
+	maxParallelWorkers: 2,
 	workerIsolation: "shared-cwd",
 	livePanels: "on",
 	maxLinesPerBox: 5,
