@@ -42,12 +42,25 @@
  *   get graded effort.
  * - CHD_GATEWAY_NON_VISION_MODELS: force vision OFF (checked first).
  * - CHD_GATEWAY_VISION_MODELS: force vision ON; otherwise only qwen3.8 and glm ids get vision.
+ *
+ * Context windows: the gateway exposes no per-model metadata, so every discovered model is
+ * registered with DEFAULT_CONTEXT_WINDOW unless its exact id is listed in CONTEXT_WINDOW_OVERRIDES.
  */
 import type { Api, Credential, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:11435/v1";
 const MODELS_TIMEOUT_MS = 10_000;
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+/**
+ * Per-model context window overrides, in tokens, applied when the catalog is built. Exact model id
+ * match; ids not listed keep DEFAULT_CONTEXT_WINDOW. Add an entry when a deployed model accepts a
+ * larger window than the gateway default (the gateway itself reports no per-model metadata).
+ */
+const CONTEXT_WINDOW_OVERRIDES: Record<string, number> = {
+	edge0_145b: 256_000,
+};
 
 /** Extra OAuthCredentials field carrying the gateway base URL (see loginChdGateway). */
 const GATEWAY_URL_FIELD = "gatewayUrl";
@@ -237,7 +250,7 @@ function toChatModel(id: string, baseUrl: string): ProviderModelConfig {
 		reasoning,
 		input: (vision ? ["text", "image"] : ["text"]) as ("image" | "text")[],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 128_000,
+		contextWindow: CONTEXT_WINDOW_OVERRIDES[id] ?? DEFAULT_CONTEXT_WINDOW,
 		maxTokens: 32_768,
 	};
 	if (!reasoning) return model;
