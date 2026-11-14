@@ -749,15 +749,20 @@ describe("decisions tool activation", () => {
 		expect(session.getActiveToolNames()).not.toContain(DECISIONS);
 	});
 
-	it("preserves the user's tool order across reload without re-appending decisions", async () => {
+	it("preserves the active loadout across reload without re-appending decisions", async () => {
+		// Upstream 1.5.2 (#11495): tools that stay active keep their existing order, newly activated
+		// tools are appended, so a reordering request does not reorder the loadout. The fork contract
+		// this test owns is that reload does not resurrect or re-append the schema `decisions` tool.
 		setSchemaFlag(true);
 		const session = await createSdkSession();
 
 		session.setActiveToolsByName(["write", "read"]);
-		expect(session.getActiveToolNames()).toEqual(["write", "read"]);
+		const before = session.getActiveToolNames();
+		expect(before).toEqual(["read", "write"]);
 
 		await session.reload();
-		expect(session.getActiveToolNames()).toEqual(["write", "read"]);
+		expect(session.getActiveToolNames()).toEqual(before);
+		expect(session.getActiveToolNames()).not.toContain(DECISIONS);
 	});
 
 	it("does not activate the decisions tool for an empty defaultTools setting", async () => {
