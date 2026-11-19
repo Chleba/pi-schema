@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "1.5.0",
+  "lastChangelogVersion": "1.6.0",
   "theme": "dark",
   "defaultProvider": "ollamamq",
   "defaultModel": "glm-5.3-flash",
@@ -8,5 +8,6 @@
     "npm:pi-orch-extension",
     "npm:pi-hermes-memory"
   ],
-  "deviceId": "137fa83c-325e-4887-bd76-eda0fac28d68"
+  "deviceId": "137fa83c-325e-4887-bd76-eda0fac28d68",
+  "hideThinkingBlock": false
 }
