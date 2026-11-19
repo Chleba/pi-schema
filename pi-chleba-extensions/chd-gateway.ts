@@ -59,7 +59,8 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
  * larger window than the gateway default (the gateway itself reports no per-model metadata).
  */
 const CONTEXT_WINDOW_OVERRIDES: Record<string, number> = {
-	edge0_145b: 256_000,
+	"edge0_145b": 256_000,
+	"glm-5.3-flash": 256_000,
 };
 
 /** Extra OAuthCredentials field carrying the gateway base URL (see loginChdGateway). */
