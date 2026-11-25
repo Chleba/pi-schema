@@ -20,6 +20,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
 import { Connection, LocalExecutionEnv, localDaemon, RemoteExecutionEnv } from "@earendil-works/pi-env";
 import {
 	type Ctx,
@@ -299,6 +300,11 @@ export type WorkerParts = {
 	 */
 	readonly copyFilesTo: (session: string, context: Context) => Promise<void>;
 	/**
+	 * Fits images to a model's limits (Photon in a worker thread that exits when idle): one per process, for `read`, the
+	 * `fit-images` extension and attachments.
+	 */
+	readonly images: ImageProcessor;
+	/**
 	 * The session's Chord store (one writer: this worker), for its backup (`plugins/backup`). Never close it. Absent in
 	 * test hosts without a store.
 	 */
@@ -408,6 +414,7 @@ export function workerCore(
 	location: SessionLocation,
 	store: Store,
 	root: WorkerParts["root"],
+	images: ImageProcessor,
 	/** The worker host's telemetry adapter, the Harness's too (its `pi.durable.*` and pi-ai's spans); none in tests. */
 	telemetry: HarnessOptions["telemetry"],
 ): Facet {
@@ -417,7 +424,7 @@ export function workerCore(
 		const own = sessionDirectory(init.dataDir, init.values.session.id);
 		const copyFilesTo = (session: string, context: Context) =>
 			copyFiles({ store, files: hostFiles(own) }, sessionDirectory(init.dataDir, session), context);
-		self.contribute(WorkerProcess, { init, liveness, location, root, copyFilesTo, store });
+		self.contribute(WorkerProcess, { init, liveness, location, root, copyFilesTo, images, store });
 		host.serve(HarnessNative, { compose: (table) => table[0]?.value });
 		host.serve(HarnessHost, (_params, self) => {
 			self.contribute(HarnessNative, openHarness(self, init, location, store, telemetry));
@@ -883,7 +890,9 @@ export async function resolveDirectory(
 	target: LocationInput,
 	from: Location,
 	context: Context,
-): Promise<Location | { error: string }> {
+): Promise<
+	{ readonly kind: "directory"; readonly location: Location } | { readonly kind: "invalid"; readonly error: string }
+> {
 	const same = target.env === from.env;
 	const typed = target.path.trim();
 	const path = !typed ? (same ? from.cwd : "~") : same || isRooted(typed) ? typed : `~/${typed}`;
@@ -892,9 +901,10 @@ export async function resolveDirectory(
 		const absolute = await env.absolutePath(path, context);
 		const canonical = absolute.ok ? await env.canonicalPath(absolute.value, context) : undefined;
 		const info = canonical?.ok ? await env.fileInfo(canonical.value, context) : undefined;
-		if (!absolute.ok || !info?.ok || info.value.kind !== "directory") return { error: "not an existing directory" };
-		return { env: target.env, cwd: absolute.value };
+		if (!absolute.ok || !info?.ok || info.value.kind !== "directory")
+			return { kind: "invalid", error: "not an existing directory" };
+		return { kind: "directory", location: { env: target.env, cwd: absolute.value } };
 	} catch (error) {
-		return { error: error instanceof Error ? error.message : String(error) };
+		return { kind: "invalid", error: error instanceof Error ? error.message : String(error) };
 	}
 }

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-25
+
+### Breaking Changes
+
+- Tool parks are tagged: `{ kind: "sleep", checkpoint?, until?, signals? }` and `{ kind: "wait", checkpoint?, on, policy }`, flat, in place of `{ sleep: { ... } }` and `{ wait: { ... } }`; a result has no `kind`. An object with another `kind` is an invalid park. Migration: return `{ kind: "sleep", ...sleep }` or `{ kind: "wait", ...wait }`, and tell a park from a result by `returned.kind`.
+- `Wrap` is tagged: `{ kind: "tool", tool, wrap }` or `{ kind: "section", section, wrap }`. Migration: build wraps with `wrapTool()` and `wrapSection()`, or add the `kind`; read the target after checking `wrap.kind`.
+- `onYield` hook results are tagged: `{ kind: "continue", continue }` or `{ kind: "tasks", tasks }`. Migration: add the `kind`. A task's `YieldDecision` (`{ continue? }`) is unchanged.
+- `beforeCompact` hook results are tagged: `{ kind: "decline" }` or `{ kind: "summary", summary }`, in place of `{ decline: true }` and `{ summary }`. Migration: return the tagged forms.
+- `Conversation.submit(tx, draft)` and `ConversationHandle.submit(tx, draft)` are `admit(tx, draft)`; `submit(draft, context)` is unchanged. Migration: rename the transaction form's calls to `admit`.
+- `SignalState` is tagged: `{ kind: "value", value }` or `{ kind: "expired" }`, in place of `{ value }` and `{ expired: true }`. Migration: test `state?.kind === "value"` or `state.kind === "expired"` instead of `"value" in state`. Stored signal memos keep their shape.
+- `CommitResult` (`Storage.commit()`) is tagged: `{ kind: "stored", stored }` or `{ kind: "refused", stored, refused }`. Migration: a custom Storage returns the tagged forms; a caller reads `refused` after checking `result.kind === "refused"`.
+
+### Fixed
+
+- Fixed `NodeExecutionEnv` on Windows not finding Git for Windows installed outside Program Files and running commands through the WSL launcher `System32\bash.exe` instead. It now asks the `git.exe` on `PATH` for its installation (`git var GIT_SHELL_PATH`, Git 2.47+) and uses its Git Bash before other `bash.exe` on `PATH` ([#12408](https://github.com/earendil-works/pi/issues/12408))
+- Fixed the Node environment's text line reader rescanning an incomplete line after every read, which made long lines take time quadratic in their length ([#12224](https://github.com/earendil-works/pi/issues/12224))
+
+## [1.6.0] - 2026-11-20
+
 ### Breaking Changes
 
 - `RunEndTask` and `runEndTask` are renamed `HookTask` and `hookTask`, as `afterTools` and `onYield` hooks now ask for tasks too. Migration: rename the import in `afterRun` hooks.
@@ -21,6 +40,8 @@
 - Gates: a `beforeTool` hook may return `{ sleep: { until?, signals? } }` to park a call before it runs; every wake, every registry publication, and every open run the whole `call` phase again, so the gates installed then decide. `HookApi.now()` reads the Harness clock.
 - Hooks that start tasks: `afterTools` and `onYield` hooks may return `{ tasks }`, run as the generation's children. An `afterTools` task ends the run with `{ terminate: true }` (`AfterToolsDecision`) or answers it with a steer; `onYield` tasks decide whether an answer stands while the run's inputs stay open (`pi.live.run.yield`): once all are terminal, the first in creation order that completed with a valid `{ continue }` (`YieldDecision`) continues the run, unless a user message or a reset was queued meanwhile.
 - Examples 38-46: signals, asking a person, a tool that waits for a webhook, a tool that polls, parallel nested calls, a subagent that waits, an approval gate, a review on yield, and an `afterTools` task that ends the run.
+- `@earendil-works/pi-durable/images/fit` fits the images entering a conversation to its model's limits with any `ImageProcessor`, before they are stored, as the coding agent does: `createFitImagesExtension(processor)` is an `afterTool` hook for the results of every tool the model calls (MCP tools, code mode's `image()`), and `fitImage(bytes, mimeType, limits, processor)` and `fitImages(content, limits, processor)` fit a host's input before it is submitted. An image that cannot be prepared is left out with a note. `imageLimits(model)` (`/tools`) resolves a model's limits as `read` does. Example 47 shows both.
+- `onAbort: "keep"` on an input submission keeps it queued through `Conversation.abort()` and abort cascades, as a failed run keeps its queue under `afterFailedRun: "keep"`: the next input places it and that run answers it. For input its sender cannot take back, such as another agent's message; `Submission.abort()` still withdraws it. The default, `"withdraw"`, settles it `unanswered` with reason `aborted` as before.
 
 ### Fixed
 

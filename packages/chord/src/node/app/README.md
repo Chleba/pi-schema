@@ -46,7 +46,7 @@ console.log(`Open ${app.ownerLink()}`);
 app.host; app.http; app.workers.get("project"); app.plugins.state; app.dataDir; app.ownerTokenFile;
 await app.basesBuilt;                                       // the bases built after the listen (failures reported)
 await app.baseWatched;                                      // base code recorded and watched (after the start)
-await app.plugins.install({ git: url, ref: "v1" }, ctx);   // into <dataDir>/plugins/
+await app.plugins.install({ kind: "git", git: url, ref: "v1" }, ctx);   // into <dataDir>/plugins/
 await app.applyChanges(ctx);                                // build the dirty plugins, roll out: server, then workers
 await app.exportData(Project({ id }), "p.tar", ctx);
 await app.importData("p.tar", Project({ id: "copy" }), ctx);
@@ -92,6 +92,8 @@ The kit's start-data objects serve process values to plugins: `AppInfo` (`chord.
 `name`, `version`, the newest API version, `owner`, the app's `principal.owner`) and `WorkerInfo`
 (`chord.app.worker-info`, on workers: `address`, `start`, the start data the app's `start(address)` made). Plugins
 `self.get(AppInfo, {})` through the app's API, which re-exports them; nothing else of the process reaches a plugin.
+The facets serving them, `appInfoFacet(info)` and `workerInfoFacet(info)`, are exported for apps that run hosts of their
+own (an app's tests with its server and workers in one process).
 
 ## Base code
 

@@ -439,14 +439,14 @@ class SessionList implements Component, Focusable {
 				if (this.showCwd) {
 					emptyMessage = `  No named sessions found. Press ${toggleKey} to show all.`;
 				} else {
-					emptyMessage = `  No named sessions in current folder. Press ${toggleKey} to show all, or Tab to view all.`;
+					emptyMessage = `  No named sessions in current folder. Press ${toggleKey} to show all, or ${keyText("tui.input.tab")} to view all.`;
 				}
 			} else if (this.showCwd) {
 				// "All" scope - no sessions anywhere that match filter
 				emptyMessage = "  No sessions found";
 			} else {
 				// "Current folder" scope - hint to try "all"
-				emptyMessage = "  No sessions in current folder. Press Tab to view all.";
+				emptyMessage = `  No sessions in current folder. Press ${keyText("tui.input.tab")} to view all.`;
 			}
 			lines.push(theme.fg("muted", truncateToWidth(emptyMessage, width, "…")));
 			return lines;
@@ -605,8 +605,7 @@ class SessionList implements Component, Focusable {
 		// Only triggers deletion when the query is empty; otherwise it is forwarded to the input
 		if (kb.matches(keyData, "app.session.deleteNoninvasive")) {
 			if (this.searchInput.getValue().length > 0) {
-				this.searchInput.handleInput(keyData);
-				this.filterSessions(this.searchInput.getValue());
+				this.handleSearchInput(keyData);
 				return;
 			}
 
@@ -647,9 +646,23 @@ class SessionList implements Component, Focusable {
 		}
 		// Pass everything else to search input
 		else {
-			this.searchInput.handleInput(keyData);
-			this.filterSessions(this.searchInput.getValue());
+			this.handleSearchInput(keyData);
 		}
+	}
+
+	/** Applies a key to the search query; a changed, non-empty query selects the top row, the best match. */
+	private handleSearchInput(keyData: string): void {
+		const previousQuery = this.searchInput.getValue();
+		this.searchInput.handleInput(keyData);
+		const query = this.searchInput.getValue();
+		// Cursor keys leave the query as it is and must not move the selection.
+		if (query === previousQuery) return;
+		this.filterSessions(query);
+		if (!query.trim()) return;
+		this.selectedIndex = 0;
+		// Untouched, sessions that are still loading keep the selection on the top row instead of on this session.
+		this.selectionTouched = false;
+		this.pendingSelectedPath = undefined;
 	}
 }
 
@@ -906,7 +919,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		panel.addChild(new Spacer(1));
 		panel.addChild(
 			new Text(
-				theme.fg("muted", `${keyText("tui.select.confirm")} to save · ${keyText("tui.select.cancel")} to cancel`),
+				theme.fg("muted", `${keyText("tui.input.submit")} to save · ${keyText("tui.select.cancel")} to cancel`),
 				1,
 				0,
 			),

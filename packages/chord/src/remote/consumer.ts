@@ -12,6 +12,7 @@ import type { Context } from "../context/index.ts";
 import { type MethodData, takesNoArgs } from "../contracts/internal.ts";
 import { ChordError, isChordError } from "../data/index.ts";
 import { asChordError } from "../data/internal.ts";
+import { revoked } from "../host/internal.ts";
 import {
 	type BoundEntry,
 	type ConsumerMessage,
@@ -29,6 +30,12 @@ import { CallWindow, type QueuedCall } from "./calls.ts";
 import { actingFor } from "./hold.ts";
 import type { HostLink } from "./host-link.ts";
 import type { RemoteObject } from "./remote-object.ts";
+
+/** The part a `bound` entry's member carries: its value. */
+const boundPart = (member: BoundEntry["members"][number]): Part => member.value;
+
+/** The part a `state` entry's member carries: its ops. */
+const statePart = (member: StateEntry["members"][number]): Part => member.ops;
 
 /** A reply to a call. */
 type Reply = Extract<Message, { readonly kind: "result" | "error" }>;
@@ -234,7 +241,10 @@ export class ConsumerSide {
 		switch (message.kind) {
 			case "bound":
 			case "state": {
-				const deflated = this.#deflated(message.holds);
+				const deflated =
+					message.kind === "bound"
+						? this.#deflated(message.holds, boundPart)
+						: this.#deflated(message.holds, statePart);
 				if (deflated !== undefined) return this.#link.inflate(deflated, () => this.message(message));
 				if (message.kind === "bound") this.#bound(message.holds);
 				else this.#state(message.holds);
@@ -309,13 +319,16 @@ export class ConsumerSide {
 	 * link's decoded limit; `undefined` when none does (nothing allocated). Entries of holds this side gave up are not
 	 * inflated (Q1).
 	 */
-	#deflated(entries: readonly (BoundEntry | StateEntry)[]): [DeflatedPart, number][] | undefined {
+	#deflated<E extends BoundEntry | StateEntry>(
+		entries: readonly E[],
+		partOf: (member: E["members"][number]) => Part,
+	): [DeflatedPart, number][] | undefined {
 		const { limits } = this.#link;
 		let deflated: [DeflatedPart, number][] | undefined;
 		for (const entry of entries) {
 			if (!this.#entries.has(entry.hold)) continue;
 			for (const member of entry.members) {
-				const part = "value" in member ? member.value : member.ops;
+				const part = partOf(member);
 				if (!this.#link.inflates(part, limits)) continue;
 				deflated ??= [];
 				deflated.push([part, limits.decoded]);
@@ -430,13 +443,16 @@ export class ConsumerSide {
 
 	/**
 	 * `failed`: its holder fails; its calls still waiting for a slot reject with the cause (a bound hold is unbound by it,
-	 * slice 7b; its calls in flight are rejected by the provider).
+	 * slice 7b; its calls in flight are rejected by the provider). A denial is access withdrawn under those calls as
+	 * under the ones in flight (slice 14 §2.3): `forbidden/revoked` for both; a call made after it meets the denied
+	 * reference and gets its plain `forbidden`.
 	 */
 	#failed(message: Extract<Message, { readonly kind: "failed" }>): void {
 		const holder = this.#entries.get(message.hold);
 		if (holder === undefined) return;
 		const error = asChordError(errorFromWire(message.cause.error), `hold ${message.hold}`);
-		for (const call of this.#window.removeHold(message.hold)) call.reject(error);
+		const rejected = message.cause.kind === "denied" ? revoked(holder.label, error) : error;
+		for (const call of this.#window.removeHold(message.hold)) call.reject(rejected);
 		holder.failed(message);
 	}
 
